@@ -1,0 +1,913 @@
+---
+title: "Multiplex Canada Predictive Projection"
+format: html
+editor: visual
+Author: "Fio Vialard"
+---
+
+## Set-up
+
+```{r}
+knitr::opts_knit$set(root.dir = "~/R files/multiplex canada") 
+# to ensure that the project is at the root directory
+knitr::opts_chunk$set(echo = TRUE, warning = F, fig.width=14, fig.height=14, message = F)
+```
+
+### Packages
+
+```{r}
+#install.packages("projpred")
+library(projpred) # main package
+#install.packages("brms")
+library(brms) # for bayesian statistics
+#install.packages("tidyverse")
+library(tidyverse) # for tidy format
+library(bayesplot) # to plot bayesian models
+theme_set(bayesplot::theme_default(base_family = "sans"))
+# library(corrplot)
+#install.packages("brms")
+#install.packages("doParallel")
+require(doParallel) # for parallelization to improve efficiency
+library(loo) # for leave-one out method
+#install.packages("doRNG")
+require(doRNG)
+```
+
+### Load imputed data and functions
+
+```{r}
+source("2_scripts/mice_final.R") # load the imputed data
+source("2_scripts/00_functions.R") # functions
+```
+
+## Complete cases
+
+Analysis without imputed data
+
+```{r}
+complete.case <- na.omit(multiplex4imp.1l2) # keep rows without missing data
+
+summary(complete.case)
+```
+
+### Select training vs testing dataset
+
+We use stratified sampling to ensure that both sites are represented equally in the training vs testing sample.
+
+```{r}
+set.seed(1105)
+
+unique_ids<-unique(complete.case$p_id)
+
+# Stratified sampling using dplyr
+training_set <- complete.case %>%
+  group_by(site) %>% # stratified by site
+  sample_frac(0.75, replace = FALSE) %>% 
+  ungroup() %>% 
+  arrange(p_id)
+
+sampled_ids <- training_set$p_id
+
+# testing set from the non-selected variables 
+testing_set <- complete.case %>% 
+  filter(!p_id %in% sampled_ids)
+
+
+## check
+length(unique_ids) == length(unique(append(training_set$p_id, testing_set $p_id)))
+
+summary(training_set)
+summary(testing_set)
+```
+
+### Fitting a reference model - normal priors
+
+Start with combining all stbbis results into positive or negative for any stbbi and use it as yvar. Changed TypePastSTd into 4 categories (i.e. viral STI, bacterial STI, Other or None) All priors as normal for now. We may change them to a strong sparsifying prior later. The full model is comprised of 20 variables.
+
+**Create Y-outcome column**
+
+```{r}
+
+training_set <- training_set %>% 
+  mutate(stbbi.pos = case_when( # create variable for STBBI positive if tested positive for HCV, HIV or syphilis
+    hcv.pos %in% 1~1,
+    hiv.pos %in% 1~1,
+    syphilis.pos %in% 1 ~1,
+    T ~0),
+    TypePastSTD = case_when( # reduce the number of categories for past type of STIs
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos)) 
+# remove columns that are not needed
+
+summary(as.factor(training_set$stbbi.pos))
+summary(as.factor(training_set$TypePastSTD))
+```
+
+```{r}
+priors <- set_prior("normal(0,1)")
+#priors <- set_prior("normal(0,100)") # set a diffuse prior
+
+
+xvar <- training_set %>% 
+  select(-c(stbbi.pos)) %>% 
+  colnames() # set every column as x-variables 
+
+# set stbbi as response variable 
+formula <- reformulate(setdiff(c(xvar), "stbbi.pos"), response = "stbbi.pos")
+
+formula
+
+# fit the model
+model.ref <- brms::brm(formula,
+                   data = training_set,
+                  family = bernoulli(link = "logit"), # binomial data
+                   prior = priors,
+                   seed = 0901,
+                  cores = 2)
+
+
+model.ref
+
+#this is to avoid to re-calulate the formula each time
+refm_obj <- get_refmodel(model.ref)
+```
+
+**Note:**
+
+Increasing the prior's SD results in greater standard error of each beta coefficient. Rhat should be equal to 1 and ESS should be large .
+
+### LOO measures - normal priors
+
+```{r}
+loo_cc <- loo(model.ref, save_psis = TRUE)
+
+loo_cc
+```
+
+compare with model without any predictors
+
+```{r}
+model0 <- update(model.ref, formula = stbbi.pos ~ 1)
+
+loo0 <- loo(model0, save_psis = TRUE)
+loo0
+
+loo_compare(loo0, loo_cc)
+```
+
+We see that ELPD is smaller for the model without predictors such that predictors are contributing information to the model.
+
+### Fit reference model - hs priors
+
+```{r}
+# Prior guess for the number of relevant (i.e., non-zero) regression
+# coefficients:
+p0 <- 5
+# Number of observations:
+N <- nrow(training_set)
+# number of regression coefficients 
+D <- length(xvar)
+# Hyperprior scale for tau, the global shrinkage parameter (note that for the
+# Gaussian family, 'rstanarm' will automatically scale this by the residual
+# standard deviation):
+tau0 <- p0 / (D - p0) * 1 / sqrt(N)
+prior_hs <- horseshoe(scale_global = tau0)
+```
+
+Update model
+
+```{r}
+model_hs_cc <- update(model.ref, prior = set_prior(prior_hs))
+model_hs_cc
+```
+
+### LOO measures - hs
+
+```{r}
+loo_cc_hs <- loo(model_hs_cc, save_psis = TRUE)
+
+loo_cc_hs
+
+loo_compare(loo_cc, loo_cc_hs)
+```
+
+Slightly better?
+
+### Variable selection - fast
+
+This method is used to quickly determine a smaller amount of predictors we can set during the cross-validation method to reduce computational cost.
+
+Normal priors
+
+```{r, fig.cap = "Submodels accuracy using rapid variable selection. The Y-axis represents estimated log predictive density (elpd) which is a performance statistic. The dashed red line represents the reference model performance"}
+
+model_cc_fast <- cv_varsel(
+  model.ref,
+  validate_search = F,
+  method = "L1", # faster variable selection
+  verbose = FALSE, # remove interactive text
+)
+
+model_cc_fast
+
+fast <- plot(model_cc_fast, stats = "elpd", ranking_nterms_max = NA)  #no ranking based on cross-validation because no cross-validation in this variable selection
+fast
+```
+
+The performance increases until it surpasses the reference model with 5 predictors and then it stabilizes.
+
+HS priors
+
+```{r, fig.cap = "Submodels accuracy using rapid variable selection. The Y-axis represents estimated log predictive density (elpd) which is a performance statistic. The dashed red line represents the reference model performance"}
+
+model_cc_fast_hs <- cv_varsel(
+  model_hs_cc,
+  validate_search = F,
+  method = "L1", # faster variable selection
+  verbose = FALSE, # remove interactive text
+)
+
+model_cc_fast_hs
+
+fast <- plot(model_cc_fast_hs, stats = "elpd", ranking_nterms_max = NA)  #no ranking based on cross-validation because no cross-validation in this variable selection
+fast
+```
+
+similar results
+
+### Variable selection - k fold
+
+We will use 5 - fold cross-validation first and set the maximum number of terms to 10 to be conservative
+
+normal priors
+
+```{r, fig.cap= "Submodels accuracy using rapid variable selection. Y axis values represent the DIFFERENCE in performance with the reference model. The percentage below each submodel represents the cross-validation ranking of predictors"}
+
+# refit the ref model 
+cv_fits <- run_cvfun(
+  model.ref # default folds is 5
+)
+
+# Final cv_varsel() run:
+model_cc_5k <- cv_varsel(
+  model.ref,
+  cv_method = "kfold",
+  cv_fits = cv_fits,
+  nterms_max = 10,
+  method = "forward",
+  verbose = T
+)
+
+model_cc_5k
+
+plot(model_cc_5k, stats = "elpd", deltas = TRUE)
+```
+
+Here the submodels surpass the full model at size 6 and then stabilizes.
+
+```{r, fig.cap= "Submodels accuracy using rapid variable selection. Y axis values represent the DIFFERENCE in performance with the reference model. The percentage below each submodel represents the cross-validation ranking of predictors"}
+
+# refit the ref model 
+cv_fits <- run_cvfun(
+  model.ref # default folds is 5
+)
+
+# Final cv_varsel() run:
+model_cc_5k <- cv_varsel(
+  model.ref,
+  cv_method = "kfold",
+  cv_fits = cv_fits,
+  nterms_max = 10,
+  method = "forward",
+  verbose = T
+)
+
+model_cc_5k
+
+plot(model_cc_5k, stats = "elpd", deltas = TRUE)
+```
+
+hs priors
+
+```{r, fig.cap= "Submodels accuracy using rapid variable selection. Y axis values represent the DIFFERENCE in performance with the reference model. The percentage below each submodel represents the cross-validation ranking of predictors"}
+
+# refit the ref model 
+cv_fits <- run_cvfun(
+  model_hs_cc # default folds is 5
+)
+
+# Final cv_varsel() run:
+model_cc_5k_hs <- cv_varsel(
+  model_hs_cc,
+  cv_method = "kfold",
+  cv_fits = cv_fits,
+  nterms_max = 10,
+  method = "forward",
+  verbose = T
+)
+
+model_cc_5k_hs
+
+plot(model_cc_5k_hs, stats = c("elpd", "rmse"), deltas = TRUE)
+```
+
+Results are similar
+
+### Variable selection - k-fold = sample size
+
+We use this method which is equivalent to LOO because the number of folds is equal to the sample size.
+
+```{r}
+cv_fits <- run_cvfun(
+  model_hs_cc,
+  K = nrow(training_set))
+
+model_cc_nk <- cv_varsel(
+  model_hs_cc,
+  cv_method = "kfold",
+  cv_fits = cv_fits,
+  nterms_max = 10,
+  method = "forward",
+  verbose = T
+)
+
+model_cc_nk
+
+performance_cc <- plot(model_cc_nk, stats = "elpd", delta = T)
+performance_cc
+```
+
+The submodel's performance surpass the reference model after predictor 6 and then stays close to the performance of the reference model but there is some variability
+
+### Variable selection LOO
+
+This method is the most recommended but is not working because we have a small amount of data.
+
+```{r}
+# ncores <- parallel::detectCores(logical = FALSE)
+# ncores # set multiple cores to run the model faster
+# 
+# options(mc.cores = 4)
+# 
+# # Final cv_varsel() run:
+# model_cc_loo <- cv_varsel(
+#   model.ref,
+#   cv_method = "LOO", 
+#   ###
+#   nterms_max = 10,
+#   parallel = T,
+#   verbose = T,
+#   n_clusters = 20, # improves efficiency,
+#   validate_search = T
+# )
+# 
+# model_cc_loo
+# 
+# plot(model_cc_loo, stats = "elpd", deltas = TRUE)
+```
+
+### Cross-validation results
+
+```{r, fig.cap = "how the ranking agrees between each cross-validation fold"}
+ranking1 <- ranking(model_cc_nk)
+
+p.ranking1 <- cv_proportions(ranking1)
+
+
+plot(p.ranking1)
+```
+
+```{r, fig.cap= "The cumulative agreement of the ranking in each cross-validation fold"}
+
+cumul_ranking_cc <- plot(cv_proportions(ranking1, cumulate = T))
+cumul_ranking_cc
+```
+
+The agreement between folds decreases with sub-model size.
+
+### Select model
+
+```{r}
+suggest_size(model_cc_nk, stat = "elpd") # this method is really approximate so better to decide by looking at plot
+
+size <- 6
+
+# all predictors in order of imporance
+ranking1[["fulldata"]]
+
+# select predictors of submodels based on agreed upon size
+predictors_final_cc <- head(ranking1[["fulldata"]], size)
+
+
+# run prediction based on reference model
+prj_m6 <- project(
+ refm_obj,
+ predictor_terms = predictors_final_cc,
+  ### In interactive use, we recommend not to deactivate the verbose mode:
+  verbose = F
+  ###
+)
+```
+
+The built-in method suggest a model of size 1 because it reaches the reference model performance but to be conservative I set the model size to 6 (later we will evaluate each submodel separately).
+
+### Posterior predictive check
+
+```{r}
+prj_predict <- proj_predict(prj_m6)
+# to see the posterior of the Y variable
+ppc_cc <- ppc_dens_overlay(y = training_set$stbbi.pos, yrep = prj_predict)
+ppc_cc
+
+# turn into matrix
+prj_mat <- as.matrix(prj_m6)
+
+# to see the posterior distribution of each beta coefficient
+mcmc_cc <- mcmc_areas(prj_mat)
+mcmc_cc
+```
+
+### Prediction performance - training data
+
+Sensitivity and specificity of our selected model
+
+```{r}
+
+training_set <- training_set %>% 
+  mutate(PastInjectDrugs = case_when(
+    PastInjectDrugs %in% "Yes" ~ "1-Yes",
+    T~as.factor(PastInjectDrugs)
+  )) #fix an error
+
+# re-run model with the new selected predictors
+
+# new formulas
+fm5 <- formula <- reformulate(setdiff(c(predictors_final_cc), "stbbi.pos"), response = "stbbi.pos") 
+
+# new models
+m5 <- brm(fm5,
+                   data = training_set,
+                  family = bernoulli(link = "logit"), # binomial data
+                   prior = priors,
+                   seed = 0901,
+                  cores = 2)
+
+# m6 <- brm(fm6,
+#                    data = training_set,
+#                   family = bernoulli(link = "logit"), # binomial data
+#                    prior = priors,
+#                    seed = 0901,
+#                   cores = 2)
+# m6$pred <- posterior_predict(m6, newdata = training_set)
+
+# measure sensitivity
+sens <- bayes.sens(training_set$stbbi.pos, m5$pred) # 100 iter default
+
+# save results in a named vector
+sens_v <- quantile(sens, probs = c(0.5, 0.055, 0.945, 0.025, 0.975)) %>% as.vector()
+names(sens_v) <- c("Q50", "Q5.5", "Q94.5", "Q2.5", "Q97.5")
+sens_v
+
+# measure specificity
+spec <- bayes.spec(training_set$stbbi.pos, m5$pred)
+
+spec_v <- quantile(spec, probs = c(0.5, 0.055, 0.945, 0.025, 0.975)) %>% as.vector()
+
+names(sens_v) <- c("Q50", "Q5.5", "Q94.5", "Q2.5", "Q97.5")
+spec_v
+
+```
+
+The specificity is much lower than the sensitivity
+
+### Prediction performance - testing data (next step)
+
+## Imputed data
+
+For now I am using the 1-level predictive selection for binary variables (like Cindy).
+
+In future steps, I will compare the results to those from other imputation models.
+
+### Select training vs testing dataset
+
+```{r}
+pooled.imp<- complete(mice.1l) # pool imputed data
+
+
+unique_ids_imp<-unique(pooled.imp$p_id)
+
+set.seed(1105)
+
+# Stratified sampling using dplyr
+training_set_imp <- pooled.imp %>%
+  group_by(site) %>%
+  sample_frac(0.75, replace = FALSE) %>% 
+  ungroup() %>% 
+  arrange(p_id)
+
+sampled_ids_imp <- training_set_imp$p_id
+
+# testing set from the non-selected variables 
+testing_set_imp <- pooled.imp %>% 
+  filter(!p_id %in% sampled_ids_imp)
+
+
+## check
+length(unique_ids_imp) == length(unique(append(training_set_imp$p_id, testing_set_imp$p_id)))
+
+summary(training_set_imp)
+summary(testing_set_imp)
+```
+
+### Fitting a reference model - normal priors
+
+Same priors as above
+
+```{r}
+
+priors <- set_prior("normal(0,1)")
+# priors <- set_prior("normal(0,10)")
+#priors <- set_prior("normal(0,100)")
+
+training_set_imp <- training_set_imp %>% 
+  mutate(stbbi.pos = case_when(
+    hcv.pos %in% 1~1,
+    hiv.pos %in% 1~1,
+    syphilis.pos %in% 1 ~1,
+    T ~0),
+    TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos))
+# for now remove type of past STD to make sure the model runs
+
+summary(as.factor(training_set_imp$stbbi.pos))
+
+# we also remove the date of recruitment and p_id
+
+xvar <- training_set_imp %>% select(-c(stbbi.pos)) %>% colnames()
+
+# set stbbi as response variable 
+formula <- reformulate(setdiff(c(xvar), "stbbi.pos"), response = "stbbi.pos")
+
+formula
+
+# fit the model
+model.ref.imp <- brms::brm(formula,
+                   data = training_set_imp,
+                  family = bernoulli(link = "logit"),
+                   prior = priors,
+                   seed = 0901,
+                  cores = 2)
+
+
+model.ref.imp
+
+refm_obj_imp <- get_refmodel(model.ref.imp)
+```
+
+**Note:** There are now 53 stbbi positive individuals in the training sample
+
+### LOO measures
+
+```{r}
+loo_imp <- loo(model.ref.imp, save_psis = TRUE)
+
+loo_imp
+```
+
+5 variables have a bad pareto k value. What should we do with them?
+
+```{r}
+model0_imp <- update(model.ref.imp, formula = stbbi.pos ~ 1,  verbose = F)
+
+loo0 <- loo(model0_imp, save_psis = TRUE)
+loo0
+
+loo_compare(loo0, loo_imp)
+```
+
+Less difference in elpd than for complete case analysis. Is it an issue with our "bad" values?
+
+### Fit reference - hs prior
+
+```{r}
+p0 <- 5
+# Number of observations:
+N <- nrow(training_set_imp)
+# number of regression coefficients 
+D <- length(xvar)
+# Hyperprior scale for tau, the global shrinkage parameter (note that for the
+# Gaussian family, 'rstanarm' will automatically scale this by the residual
+# standard deviation):
+tau0 <- p0 / (D - p0) * 1 / sqrt(N)
+prior_hs <- horseshoe(scale_global = tau0)
+```
+
+update model
+
+```{r}
+
+model_imp_hs <- update(model.ref.imp, prior = set_prior(prior_hs))
+model_imp_hs
+```
+
+### LOO measures - hs prior
+
+```{r}
+loo_imp_hs <- loo(model_imp_hs, save_psis = TRUE)
+
+loo_imp_hs
+
+loo_compare(loo_imp, loo_imp_hs)
+```
+
+Better using the hs prior because there are no bad values
+
+### Variable selection - fast
+
+Normal prior
+
+```{r}
+model_fast_imp <- cv_varsel(
+  model.ref.imp, 
+  validate_search = F,
+  method = "L1",
+  verbose = FALSE, # remove the text
+)
+
+model_fast_imp
+
+plot(model_fast_imp, stats = "elpd", ranking_nterms_max = NA)
+```
+
+The model reaches the performance with one predictor. Overfitting?
+
+hs prior
+
+```{r}
+model_fast_imp_hs <- cv_varsel(
+  model_imp_hs, 
+  validate_search = F,
+  method = "L1",
+  verbose = FALSE, # remove the text
+)
+
+model_fast_imp_hs
+
+plot(model_fast_imp_hs, stats = "elpd", ranking_nterms_max = NA)
+```
+
+Reaches the model performance after 5 predictors
+
+### Variable selection - k fold
+
+normal priors
+
+```{r}
+ # refit the ref model 
+cv_fits_imp <- run_cvfun(
+  model.ref.imp # 5k is default
+)
+
+# Final cv_varsel() run:
+model_imp_5k <- cv_varsel(
+  model.ref.imp,
+  cv_method = "kfold",
+  cv_fits = cv_fits_imp,
+  method = "L1",
+  nterms_max = 10,
+  verbose = T
+)
+
+model_imp_5k
+
+plot_k5 <- plot(model_imp_5k, stats = "elpd", deltas = TRUE)
+plot_k5
+```
+
+does not reach the reference model
+
+hs priors
+
+```{r}
+cv_fits_imp <- run_cvfun(
+  model_imp_hs # 5k is default
+)
+
+# Final cv_varsel() run:
+model_imp_5k_hs <- cv_varsel(
+  model_imp_hs,
+  cv_method = "kfold",
+  cv_fits = cv_fits_imp,
+  method = "L1",
+  nterms_max = 15,
+  verbose = T
+)
+
+model_imp_5k_hs
+
+plot_k5 <- plot(model_imp_5k_hs, stats = "elpd", deltas = TRUE)
+plot_k5
+```
+
+Reaches the performance at model 8
+
+### Variable selection - k-fold = sample size
+
+```{r}
+cv_fits <- run_cvfun(
+  model_imp_hs,
+  K = nrow(training_set_imp))
+
+model_imp_nk <- cv_varsel(
+  model_imp_hs,
+  cv_method = "kfold",
+  cv_fits = cv_fits,
+  nterms_max = 15,
+  method = "forward",
+  verbose = T
+)
+
+model_imp_nk
+
+performance_imp <- plot(model_imp_nk, stats = "elpd", delta = T)
+performance_imp
+```
+
+The performance is highest with one predictor and progressively gets worse.
+
+### Variable selection - LOO
+
+```{r}
+# # Final cv_varsel() run:
+# model_loo <- cv_varsel(
+#   model.ref.imp,
+#   cv_method = "LOO",
+#   nterms_max = 15,
+#   parallel = F, # removed this argument because of issues with windows 10
+#   verbose = T, 
+#   nclusters = 10
+# )
+# 
+# model_loo
+# 
+# plot(model_loo, stats = "elpd", deltas = TRUE)
+```
+
+### Cross-validation results
+
+```{r, fig.cap = "how the ranking agrees between each cross-validation fold"}
+ranking_imp <- ranking(model_imp_nk)
+
+p.ranking.imp <- cv_proportions(ranking_imp)
+
+
+plot(p.ranking.imp) 
+```
+
+```{r, fig.cap= "The cumulative agreement of the ranking in each cross-validation fold"}
+
+cumul_ranking_imp <- plot(cv_proportions(ranking_imp, cumulate = T))
+cumul_ranking_imp
+```
+
+There is a lot of variability in predictor ranking between folds.
+
+### Select model
+
+```{r}
+suggest_size(model_imp_nk, stat = "elpd")
+
+size <- 8
+
+ranking_imp[["fulldata"]] 
+
+predictors_final_imp <- head(ranking_imp[["fulldata"]], size)  
+
+ref_obj_hs<- model_imp_hs
+
+prj_m8 <- project(  
+  ref_obj_hs, 
+  predictor_terms = predictors_final_imp,   ### In interactive use, we recommend not to deactivate the verbose mode:   
+  verbose = F   ###
+  )
+```
+
+Suggest size 8
+
+### Posterior predictive check
+
+```{r}
+prj_predict <- proj_predict(prj_m8)
+
+# Using the 'bayesplot' package: 
+ppc_imp <- ppc_dens_overlay(y = training_set_imp$stbbi.pos, yrep = prj_predict)
+
+ppc_imp
+
+# turn into matrix 
+prj_mat <- as.matrix(prj_m8)
+
+# to see the posterior distribution of each beta coefficient 
+mcmc_imp <- mcmc_areas(prj_mat)
+mcmc_imp
+```
+
+### Prediction performance - training data
+
+Sensitivity and specificity of our selected model
+
+```{r}
+# use the submodel function
+submodels8<- submodels(model_imp_hs, predictor_ranking = predictors_final_imp, new_data = training_set_imp)
+
+# measure sensitivity, specificity and AUC using cindy's formula for all models
+submodels8
+
+sens <- bayes.sens(training_set_imp$stbbi.pos, submodels8[[8]]$pred) # 100 iter default  
+sens_v <- quantile(sens, probs = c(0.5, 0.055, 0.945, 0.025, 0.975)) %>% as.vector()
+
+names(sens_v) <- c("Q50", "Q5.5", "Q94.5", "Q2.5", "Q97.5") 
+sens_v  
+
+spec <- bayes.spec(training_set_imp$stbbi.pos,submodels8[[8]]$pred)  
+
+spec_v <- quantile(spec, probs = c(0.5, 0.055, 0.945, 0.025, 0.975)) %>% as.vector()  
+
+names(spec_v) <- c("Q50", "Q5.5", "Q94.5", "Q2.5", "Q97.5") 
+
+spec_v 
+```
+
+The specificity is much lower than the sensitivity
+
+AUC
+
+```{r}
+auc <- bayes.auc(training_set_imp$stbbi.pos,submodels8[[8]]$fitted)
+auc_v <- quantile(auc, probs = c(0.5, 0.055, 0.945, 0.025, 0.975)) %>% as.vector()
+
+names(auc_v) <- c("Q50", "Q5.5", "Q94.5", "Q2.5", "Q97.5") 
+auc_v
+```
+
+Later will measure it for all using Cindy's code
+
+### Prediction performance - testing data
+
+## Plots
+
+```{r}
+performance_plots <- bayesplot_grid(performance_imp, performance_cc, save_gg_objects = T, grid_args = list(ncol=2))
+
+cross_validation <- bayesplot_grid(cumul_ranking_imp, cumul_ranking_cc, grid_args = list(ncol=2))
+  
+posteriors <-bayesplot_grid(mcmc_imp, mcmc_cc, grid_args = list(ncol=2))
+
+ggsave("3_intermediate/projpred/performance.png", performance_plots, device = "png", width = 16, height = 7)
+
+ggsave("3_intermediate/projpred/cv.png", cross_validation, device = "png", width = 16, height = 7)
+
+ggsave("3_intermediate/projpred/posteriors.png", posteriors, 
+       device = "png", width = 16, height = 7)
+```
+
+## Notes from Dr. Zhang
+
+\- make the priors (sd = 100) --\> results in issues with glm fitting see [vignette](https://mc-stan.org/projpred/articles/projpred.html#troubleshooting) in complete case analysis but worked in the imputed dataset
+
+\- sharing needles actually provides additional information so okay to leave - done
+
+\- increase the cap of the terms in the imputed dataset - done
+
+\- show specificity and sensitivity of the predictions - done
+
+\- make sure you are visualizing the posterior properly, not the outcome but the beta coefficient but good idea - done
+
+\- when you do it properly, if you still have 2 modals it means that the prior is too strong
+
+## **Next step:**
+
+1\) Try this method with several imputation models
+
+2\) Try to incorporate back the type of past STI testing/ change all results to binomial? What is our best reference model? - done
+
+3\) determine which projection method is the best
+
+4\) choose the appropriate priors -
+
+5\) analyse submodel accuracy using the testing set
+
+6\) post selection inference
+
+## **Reference:**
+
+Piironen J, Paasiniemi M, Catalina A, Weber F, Vehtari A (2023). "projpred: Projection Predictive Feature Selection." R package version 2.8.0, <https://mc-stan.org/projpred/>.
+
+See vignettes for more information

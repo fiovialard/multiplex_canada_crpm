@@ -5,7 +5,6 @@
 local
 *.pdf
 *.html
-*.png
 *.docx
-2_scripts
+*.png
 4_outputs

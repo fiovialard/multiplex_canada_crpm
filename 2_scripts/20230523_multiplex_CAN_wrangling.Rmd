@@ -1,0 +1,542 @@
+---
+title: "Multiplex Canada Wrangling"
+author: "Fio Vialard"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set-up
+
+### packages
+
+```{r}
+library(tidyverse)
+library(lubridate)
+```
+
+## App-based data
+
+### Importing file
+
+```{r}
+multiplex.raw <- read.csv("1_data/20230523_multiplex_CAN_raw.csv")
+
+dim(multiplex.raw)
+
+n <- nrow(multiplex.raw)
+
+```
+
+### DATE: remove time and transform into date
+
+```{r}
+class(multiplex.raw$DateRecuit)
+
+multiplex <- multiplex.raw %>% 
+  mutate(DateRecuit = str_replace_all(DateRecuit, " 0:00", ""),
+         DateFollowup = str_replace_all(DateFollowup, " 0:00", "")) %>%
+  mutate(DateRecuit = mdy(DateRecuit), DateFollowup = mdy(DateFollowup))
+
+# warning is due to some of the entries not having follow-up
+
+head(multiplex$DateRecuit)
+
+class(multiplex$DateRecuit)
+
+head(multiplex$DateFollowup)
+```
+
+### remove columns that are not needed
+
+```{r}
+multiplex2 <- multiplex %>% 
+  select(-c(id, NameHCP, region_id, AdditionalComments, created_at, updated_at, TATChembio,TATOraQuick, TATDBS,TATHIVRNA, TATHIVp24,TATTPPA, TATHCVRNA, typefollowupHIV, TypeFollowupSyphilis, TypeFollowupHepC))
+
+head(multiplex2)
+
+summary(multiplex2)
+```
+
+### add location column
+
+```{r}
+multiplex3 <- multiplex2 %>% mutate(location = ifelse(str_detect(p_id, "NB"), "NB", "QC"))
+
+summary(as.factor(multiplex3$location))
+```
+
+### Save follow-up information separately
+
+```{r}
+multiplex.follow.up <- multiplex3 %>% select(c(1, 34:65))
+head(multiplex.follow.up)
+
+write.csv(multiplex.follow.up, "3_intermediate/wrangling/20230726_multiplex_CAN_fu_clean.csv", row.names = F)
+
+multiplex4 <- multiplex3 %>% select(-c(34:65))
+head(multiplex4)
+
+summary(multiplex4)
+```
+
+
+## Add results from RECAP records
+
+## Load data
+
+```{r}
+recap.records.raw <- read.csv("1_data/multiplex_data_missing.csv")
+```
+
+### Change answers
+
+-   No information, N/A, and unknown to NA
+-   No + lab test to None & Chlamydia 2019 to Chlamydia in Past STD
+-   In the Past to Yes
+- None on file/ not likely to no 
+-   Calculate time of last test based on recruitment date
+
+```{r}
+recap.records.raw[recap.records.raw == "No Info"] <- NA
+recap.records.raw[recap.records.raw == "Unknown"] <- NA
+recap.records.raw[recap.records.raw == "N/A"] <- NA
+
+recap.records.notes <-  recap.records.raw %>% 
+  select(!c(Column1, X)) %>%
+  mutate(DateRecuit = mdy(DateRecuit), 
+    comments = ifelse(TypePastSTD== "No Lab + Tests"|PastHIVTest == "None on file"|
+                           PastHCVTest== "None on file"|PastSyphilisTest == "None on file"| PastSyphilis == "None on file", 
+                           "Testing could have occured in a different site and positive tests reported in another province", NA),
+         comments = ifelse(Alcohol == "None Reported"| Alcohol == "Likely No (No + ETOH on file)", 
+                           "Alcohol consumption in unlikely", comments))
+
+recap.records <- recap.records.notes %>% 
+  mutate(TypePastSTD = ifelse(TypePastSTD== "No Lab + Tests", "None", TypePastSTD),
+         TypePastSTD = str_replace(TypePastSTD, "Chlamydia 2019", "3-Chlamydia"),
+         ShareNeedles = ifelse(ShareNeedles == "Yes" | ShareNeedles == "In the past", "1-Yes", ShareNeedles),
+         Alcohol = ifelse(Alcohol == "Likely No (No + ETOH on file)"|Alcohol == "None Reported", "0-No", Alcohol),
+         across(c(PastHIVTest, PastHCVTest, PastSyphilisTest, PastSyphilis), 
+                ~ str_replace_all(., "None on file", "0-No")))
+
+## set to date format and change to categorical variable
+recap.dates <- recap.records %>%
+  filter((PastHIVTest == "Dec-20"| PastHIVTest == "Apr-21"|PastHIVTest == "Oct-21"|PastHIVTest == "Mar-18")) %>%
+  mutate(across(c(PastHIVTest, PastHCVTest, PastSyphilisTest), ~my(.)))
+
+recap.dates <- recap.dates %>% 
+  mutate(across(c(PastHIVTest, PastHCVTest, PastSyphilisTest), ~as.character(DateRecuit - .)))
+
+six_m_in_d <-  6*30
+
+recap.dates <- recap.dates %>% 
+  mutate(across(c(PastHIVTest, PastHCVTest, PastSyphilisTest),~ifelse (. < six_m_in_d|. == 55, "1-Yes; less than 6 months ago", "3-Yes; more than 1 year ago")))
+
+# replace the NA that was removed during date transformation
+recap.dates[1, "PastSyphilisTest"] <- "0-No"
+
+# remove rows in recap records
+recap.record.change <- recap.records[!(recap.records$p_id %in% recap.dates$p_id),]
+
+# add rows back from date
+
+recap.records.clean <- recap.record.change %>%
+  bind_rows(recap.dates) %>% 
+  arrange(p_id)
+
+```
+
+Added notes for those where the answers could mean they had been tested before
+
+### Add back to main dataset
+
+```{r}
+# remove rows in recap records
+mx.change <- multiplex4[!(multiplex4$p_id %in% recap.records.clean$p_id),]
+
+# add rows back from date
+
+multiplex5 <- mx.change %>%
+  bind_rows(recap.records.clean) %>% 
+  arrange(p_id)
+```
+
+### add na and factorize
+
+errors of input in age, patient-reported outcomes variable: ages 18-24 and 25-34 were transformed into dates.
+
+```{r}
+multiplex5 <- multiplex5 %>% 
+  mutate(Age = ifelse(Age == "1/18/2024", "1-18-24", multiplex5$Age),
+         SexualPartners = str_replace_all(SexualPartners, "1-Jan", "1-1"),
+         across(c(22:28), ~ str_replace_all(., "2-Jan", "1-2")),
+         across(22:28, ~ str_replace_all(., "3-Feb", "2-3")),
+          across(22:28, ~ str_replace_all(., "4-Mar", "3-4")),
+         across(3:28, ~ifelse(.=="No", "0-No",.)))
+
+
+multiplex6 <- multiplex5 %>%
+  mutate(Age = ifelse(Age == "2/25/1934", "1-25-34", multiplex5$Age)) %>% replace(multiplex5 =='', NA) %>%
+  mutate_if(is.character, as.factor) %>%
+  mutate_if(is.character, as.factor)
+
+summary(multiplex6)
+```
+
+
+### save
+
+```{r}
+write.csv(multiplex6, "3_intermediate/wrangling/20230726_multiplex_CAN_clean.csv", row.names =  F)
+```
+
+## clinic records - RECAP
+
+### import
+
+```{r}
+recap.raw <- read.csv("1_data/20230603_RECAP_multiplex_CAN_raw.csv", skip=1)
+
+dim(recap.raw)
+
+nrow(recap.raw)
+```
+
+### check for unique IDs and remove those that do not have participant information
+
+```{r}
+unique.ID <- unique(recap.raw$Participant.ID) # all unique so some were removed from the analysis?
+summary(unique.ID)
+
+recap.participants <- recap.raw %>% 
+  filter(Visit_1_Status == "Complete")
+
+dim(recap.participants) # check
+
+n.recap <- nrow(recap.participants)
+
+```
+
+### keep columns about infection status only (+clinic location)
+
+we want to know the HIV, HCV and syphilis initial (known status) to see which were new infection and the columns with lab results are those are determined to be the true positives
+
+```{r}
+recap.infection <- recap.participants %>% 
+  select(Participant.ID, Clinic.Location, HCV_Initial, HIV_Initial, TP_Initial, HCV_Ab, HIV_Ab, Trep_Ab) %>% 
+  mutate(Participant.ID = str_replace_all(Participant.ID, "-", "")) %>%
+  rename(p_id = Participant.ID)
+
+head(recap.infection)
+
+summary(recap.infection) # all characters 
+```
+
+### factorize
+
+```{r}
+recap.factor <- recap.infection %>% 
+  mutate_if(is.character, as.factor)
+
+summary(recap.factor)
+```
+
+### remove typos
+
+```{r}
+recap.infection1 <- recap.infection %>% 
+  mutate(Clinic.Location = ifelse(Clinic.Location== "outreach", "Outreach", recap.infection$Clinic.Location),
+         HCV_Ab = ifelse(HCV_Ab=="Not done", "Not Done", recap.infection$HCV_Ab), 
+         HIV_Ab = ifelse(HIV_Ab=="Not done", "Not Done", recap.infection$HIV_Ab),
+         Trep_Ab = ifelse(Trep_Ab=="Not done", "Not Done", recap.infection$Trep_Ab))
+
+recap.infection1 <- recap.infection1 %>% 
+  mutate(Clinic.Location = ifelse(Clinic.Location == "RECAp", "RECAP", recap.infection1$Clinic.Location))
+
+summary(as.factor(recap.infection1$Clinic.Location))
+summary(as.factor(recap.infection1$HCV_Ab))
+summary(as.factor(recap.infection1$HIV_Ab))
+summary(as.factor(recap.infection1$Trep_Ab))
+```
+
+### Determine number of infections
+
+```{r}
+recap.infection2 <- recap.infection1 %>% 
+  mutate(hcv.pos = as.factor(ifelse(HCV_Ab == "Reactive", 1, 0)), 
+         hiv.pos = as.factor(ifelse(HIV_Ab == "Reactive", 1, 0)),
+         syphilis.pos = as.factor(ifelse(Trep_Ab == "Reactive", 1, 0)))
+
+summary(recap.infection2$hcv.pos)
+summary(recap.infection2$hiv.pos)
+summary(recap.infection2$syphilis.pos)
+head(recap.infection2)
+
+# total infections 
+
+hcv.pos <- sum(recap.infection2$hcv.pos == 1)
+hiv.pos <- sum(recap.infection2$hiv.pos == 1)
+syphilis.pos <- sum(recap.infection2$syphilis.pos == 1)
+stbbi.pos <- hcv.pos + hiv.pos + syphilis.pos
+
+hcv.prop <- round(hcv.pos/n.recap, digits = 3)
+syphilis.prop <- round(syphilis.pos/n.recap, digits = 3)
+stbbi.prop <- round(stbbi.pos/n.recap, digits = 3)
+```
+
+There were `r hcv.pos` HCV infections, `r hiv.pos` HIV infections and `r syphilis.pos` for a total of `r stbbi.pos` infections.
+
+Positivity rate: `r hcv.prop` for HCV, `r syphilis.prop` for syphilis and `r stbbi.prop` total.
+
+### new HCV infections
+
+There was no HIV detected and all syphilis infections were new
+
+```{r}
+recap.infection.3 <- recap.infection2 %>%
+  mutate(baseline.hcv = as.factor(ifelse(HCV_Initial == "Negative"| HCV_Initial == "Unknown", 1,0)),
+         baseline.hiv = as.factor(ifelse(HIV_Initial == "Negative"|HIV_Initial == "Unknown", 1,0)),
+         baseline.syph = as.factor(ifelse(TP_Initial == "Negative"|TP_Initial == "Unknown", 1,0)))
+
+summary(recap.infection.3$baseline.hcv)
+
+
+recap.infection.3 <- recap.infection.3 %>% 
+  mutate(new.hcv = as.factor(ifelse(baseline.hcv == 1 & hcv.pos == 1, 1, 0)),
+         new.syphilis = as.factor(ifelse(baseline.syph == 1 & syphilis.pos == 1, 1, 0)),
+         new.hiv = as.factor(ifelse(baseline.hiv == 1 & hiv.pos == 1, 1, 0)))
+
+summary(recap.infection.3$new.hcv)
+summary(recap.infection.3$new.syphilis)
+summary(recap.infection.3$new.hiv)
+```
+
+I only get 12 new infections if I select known negative or unknown status
+
+To get 26 new infections I had to select those with treated and spontaneously cleared status. This seems wrong.
+
+Also I detected one new syphilis infection.
+
+### save cleaned dataset
+
+```{r}
+write.csv(recap.infection.3, "3_intermediate/wrangling/20230506__RECAP_multiplex_CAN_clean.csv", , row.names = F)
+```
+
+## clinic records - REZO
+
+### import
+
+```{r}
+rezo.raw <- read.csv("1_data/20230603_REZO_multiplex_CAN_raw.csv")
+
+dim(rezo.raw)
+
+nrow(rezo.raw)
+```
+
+### keep only rows with participant ID
+
+```{r}
+rezo.participants <- rezo.raw %>% 
+  filter(IDENTIFIANT != "")
+
+dim(rezo.participants) # check
+
+n.rezo <- nrow(rezo.participants)
+```
+
+### keep only columns with test information
+
+```{r}
+rezo.infection <- rezo.participants %>% 
+  select(IDENTIFIANT, SYPHILIS.connu, HÉPATITE.C, si.traitée.pr.Vhc, VIH.connu, CHEMBIO, MULTIPLO, Labos.CHUM.sang, TP.PA, DBS.anti.VIH, DBS.anti.HCV, DBS.RPR.syphilis) %>% 
+  rename(p_id = IDENTIFIANT , hcv.treated = si.traitée.pr.Vhc, lab.results = Labos.CHUM.sang)
+
+head(rezo.infection)
+
+summary(rezo.infection)
+```
+
+### factorize
+
+```{r}
+rezo.factor <- rezo.infection %>% 
+  mutate_if(is.character, as.factor)
+
+summary(rezo.factor)
+```
+
+### split the character strings into multiple columns
+
+```{r}
+rezo.infection1 <- rezo.infection %>% 
+  separate(SYPHILIS.connu, c("baseline.syph", "syph.status.time"), extra = "merge", fill = "right") %>% 
+  separate(VIH.connu, c("baseline.hiv", "hiv.status.comments") , extra = "merge", fill = "right") %>%
+  separate(HÉPATITE.C, c("baseline.hcv", "hcv.status.comments") , extra = "merge", fill = "right") %>%
+  mutate(lab.results = str_replace_all(lab.results, " ", "")) %>%
+  mutate(lab.results = str_to_lower(lab.results)) %>%
+  mutate(lab.results = str_replace_all(lab.results, "(négatifs|négatif|negatif|neg|nég)", "-")) %>%
+  # this removed the mention of vhc negatif to be just vhc so have to fix later
+  mutate(lab.results = str_replace_all(lab.results, "et", "/")) %>%
+  mutate(lab.results = str_replace_all(lab.results, "--", "-/")) %>%
+  mutate(lab.results = str_replace_all(lab.results, "nx1vih", "nx1/vih")) %>%
+  mutate(lab.results = str_replace_all(lab.results, "1/8", "1:8")) %>%
+  mutate(lab.results = str_replace_all(lab.results, "s", "rpr")) %>% 
+  mutate(lab.results = gsub("[()]", "", lab.results)) %>%
+  mutate(p_id = str_replace_all(p_id, "-", ""))
+
+head(rezo.infection1)
+
+
+summary(as.factor(rezo.infection1$lab.results))
+
+```
+
+### split lab results into positives for each pathogen
+
+```{r}
+rezo.infection2 <- rezo.infection1 %>%
+  mutate(syphilis.pos = as.factor(ifelse(lab.results == "nx3", 0, NA)),
+                          hiv.pos = as.factor(ifelse(lab.results == "nx3", 0, NA)),
+                          hcv.pos = as.factor(ifelse(lab.results == "nx3", 0, NA)))
+
+summary(rezo.infection2$syphilis.pos)
+summary(rezo.infection2$hiv.pos)
+summary(rezo.infection2$hcv.pos)
+```
+
+181 negatives for all 3
+
+### split results and change x2 mention to nx2 and vhc to vhc-
+
+```{r}
+rezo.infection3 <- rezo.infection2 %>%
+  separate(lab.results, c("lab.test1", "lab.test2", "lab.test3") ,sep = "/", extra = "merge", fill = "right") %>%
+  mutate(lab.test1 = ifelse(lab.test1=="x2", "nx2",lab.test1), lab.test2= ifelse(lab.test2=="vhc", "vhc-",lab.test2))
+  
+
+summary(as.factor(rezo.infection3$lab.test1))
+summary(as.factor(rezo.infection3$lab.test2))
+summary(as.factor(rezo.infection3$lab.test3))
+
+```
+
+### find positives and create column with positve vs negative results for each pathogen as factor
+
+```{r}
+rezo.pos.count <-  rezo.infection3 %>%
+  mutate(syphilis.pos = as.factor(ifelse(lab.test1 == "rpr1:64"|lab.test1 =="rpr1:8"|lab.test2=="rpr1:1"|lab.test2=="rpr1:16",1,0)),
+         hcv.pos = as.factor(ifelse(lab.test1 == "vhc+"|lab.test2 =="vhc+",1,0)),
+         hiv.pos = as.factor(ifelse(lab.test1 == "vih+"|lab.test2 =="vih+"|lab.test3=="vih+",1,rezo.infection3$syphilis.pos)))
+
+
+summary(rezo.pos.count$hcv.pos) #13 pos
+summary(rezo.pos.count$hiv.pos) #16 pos
+summary(rezo.pos.count$syphilis.pos) #4
+
+rezo.infection4 <- rezo.infection3 %>%
+  mutate(syphilis.pos = as.factor(ifelse(lab.test1 %in% c("rpr1:64", "rpr1:8") | lab.test2 %in% c("rpr1:1", "rpr1:16"), 1, 0)),
+         hcv.pos = as.factor(ifelse(lab.test1 %in% c("vhc+") | lab.test2 %in% c("vhc+"), 1, 0)),
+         hiv.pos = as.factor(case_when(
+           lab.test1 %in% c("vih+") | lab.test2 %in% c("vih+") | lab.test3 %in% c("vih+") ~ 1,
+           TRUE ~ 0
+         )))
+
+summary(rezo.infection4$syphilis.pos) #4
+summary(rezo.infection4$hiv.pos) #16
+summary(rezo.infection4$hcv.pos) #13 
+
+```
+
+I found 4 syphilis infections, 16 hiv infections and 13 hcv infections
+
+### new infections only
+
+```{r}
+rezo.infection5 <- rezo.infection4 %>%
+  mutate(baseline.hiv = ifelse(hiv.status.comments %in% c("oui DSP )"), "oui", rezo.infection4$baseline.hiv),
+         baseline.hcv = ifelse(hcv.status.comments %in% c("oui DSP )"), "oui", rezo.infection4$baseline.hcv)) 
+
+summary(as.factor(rezo.infection5$baseline.hiv))
+
+rezo.infection6 <- rezo.infection5 %>%
+  mutate(baseline.hiv = ifelse(baseline.hiv == "n", 0, 1), 
+         baseline.hcv = ifelse(baseline.hcv == "n", 0, 1),
+         baseline.syph = ifelse (baseline.syph == "n", 0, 1)) # assuming the "possible" case is truly a case
+
+rezo.infection7 <- rezo.infection6%>%
+  mutate(new.syphilis = as.factor(ifelse(baseline.syph == 0 &syphilis.pos ==1, 1,0)),
+         new.hcv = as.factor(ifelse(baseline.hcv ==0 & hcv.pos ==1, 1,0)),
+         new.hiv = as.factor(ifelse(baseline.hiv ==0 & hiv.pos ==1, 1,0)))
+
+summary(rezo.infection7$new.syphilis) #1 
+summary(rezo.infection7$new.hcv) #2, investigate this 
+summary(rezo.infection7$new.hiv) #2, why did Angela only report 1?
+
+```
+
+Looking at the new infections only, I found 1 new syphilis, 2 new hcv and 2 new hiv infections
+
+### save cleaned dataset
+
+```{r}
+write.csv(rezo.infection7, "3_intermediate/wrangling/20230506__REZO_multiplex_CAN_clean.csv", row.names = F)
+```
+
+## combining datasets
+
+### load cleaned datasets
+
+```{r}
+rezo.clean <- read.csv("3_intermediate/wrangling/20230506__REZO_multiplex_CAN_clean.csv")
+
+recap.clean <- read.csv("3_intermediate/wrangling/20230506__RECAP_multiplex_CAN_clean.csv")
+
+multiplex.clean <- read.csv("3_intermediate/wrangling/20230726_multiplex_CAN_clean.csv")
+
+```
+
+### combine rezo, recap and multiplex
+
+```{r}
+site.comb <-  bind_rows(recap.clean, rezo.clean)
+
+nrow(site.comb)
+
+
+
+multiplex.comb <- full_join(multiplex.clean, site.comb, by = "p_id")
+
+nrow(multiplex.comb) # one extra recap participant that was not captured in the app or removed? 
+
+summary(multiplex.comb)
+```
+
+### clean up columns
+
+```{r}
+multiplex.comb1 <- multiplex.comb %>% 
+  select(-c("HCV_Initial":"Trep_Ab", "syph.status.time":"DBS.RPR.syphilis")) %>% 
+  mutate(Clinic.Location = ifelse(is.na(Clinic.Location), "REZO", multiplex.comb$Clinic.Location))
+
+summary(multiplex.comb1)
+```
+
+### add NA and factorize
+
+```{r}
+multiplex.comb2 <- multiplex.comb1 %>% replace(multiplex.comb1 ==''|multiplex.comb1 == " ", NA) %>%
+  mutate_if(is.character, as.factor)
+
+summary(multiplex.comb2)
+```
+
+### save
+
+```{r}
+write.csv(multiplex.comb2, "3_intermediate/wrangling/20230728__multiplex_combined_sites.csv", row.names = F)
+```
