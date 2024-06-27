@@ -3,9 +3,9 @@
 .RData
 .Ruserdata
 local
-.pdf
-.html
-.png
-.docx
-2_script
+*.pdf
+*.html
+*.png
+*.docx
+2_scripts
 4_outputs
