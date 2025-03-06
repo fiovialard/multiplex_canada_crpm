@@ -1,0 +1,1253 @@
+---
+title: "Multiplex Canada Predictive Projection"
+format: 
+  html:
+    embed-resources: true
+editor: visual
+Author: "Fio Vialard"
+---
+
+In this revised version, we compare our main result with a sensitivity analysis with:
+
+-   Complete case analysis
+
+-   Stratifying HCV and HIV/syphilis
+
+-   Model without syphilis (as per reviewer's request)
+
+-   Model with just HIV (as an additional analysis, not included in the manuscript)
+
+To reduce the computational power, only 5-fold cross-validation is used.
+
+Note: the final performance measures may change slightly from the manuscript measures because the sampling frame changes for each run.
+
+## Set-up
+
+```{r}
+knitr::opts_knit$set(root.dir = "~/R files/multiplex canada") 
+# to ensure that the project is at the root directory
+knitr::opts_chunk$set(echo = TRUE, warning = F, fig.width=14, fig.height=18, message = F, verbose = F)
+```
+
+### Packages
+
+```{r}
+library(projpred) # main package
+library(brms) # for bayesian statistics
+library(tidyverse) # for tidy format
+library(bayesplot) # to plot bayesian models
+theme_set(bayesplot::theme_default(base_family = "sans"))
+require(mice)
+require(diffobj)
+# require(loo)
+```
+
+### Load imputed data and functions
+
+```{r}
+source("2_scripts/00_functions.R") # functions
+df_imp<- read.csv("3_intermediate/imputed/imputed_data_long_no_prom_1l.csv") #imputed data
+mice_obj<- as.mids(df_imp)
+```
+
+### Select training vs testing dataset
+
+::: panel-tabset
+## imp
+
+```{r}
+pooled.imp<- complete(mice_obj) # pool imputed data
+
+
+unique_ids_imp<-unique(pooled.imp$p_id)
+
+# Stratified sampling using dplyr
+training_set_imp_all <- pooled.imp %>%
+  group_by(site) %>%
+  sample_frac(0.75, replace = FALSE) %>% 
+  ungroup() %>% 
+  arrange(p_id)
+
+sampled_ids_imp <- training_set_imp_all$p_id
+
+# testing set from the non-selected variables 
+testing_set_imp_all <- pooled.imp %>% 
+  filter(!p_id %in% sampled_ids_imp)
+
+
+## check
+length(unique_ids_imp) == length(unique(append(training_set_imp_all$p_id, testing_set_imp_all$p_id)))
+
+```
+
+## CC
+
+```{r}
+complete.case <-  na.omit(mice_obj$data)# keep rows without missing data
+
+
+unique_ids<-unique(complete.case$p_id)
+
+# Stratified sampling using dplyr
+training_set <- complete.case %>%
+  group_by(site) %>% # stratified by site
+  sample_frac(0.75, replace = FALSE) %>% 
+  ungroup() %>% 
+  arrange(p_id)
+
+sampled_ids <- training_set$p_id
+
+# testing set from the non-selected variables 
+testing_set <- complete.case %>% 
+  filter(!p_id %in% sampled_ids)
+
+
+## check
+length(unique_ids) == length(unique(append(training_set$p_id, testing_set $p_id)))
+
+```
+:::
+
+### Modify outcomes of interest
+
+::: panel-tabset
+## Y=STBBI
+
+```{r}
+
+training_set_imp <- training_set_imp_all %>% 
+  mutate(stbbi.pos = case_when(
+    hcv.pos %in% 1~1,
+    hiv.pos %in% 1~1,
+    syphilis.pos %in% 1 ~1,
+    T ~0),
+    TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+
+sum1<- summary(training_set_imp)
+sum1
+
+testing_set_imp <- testing_set_imp_all %>%
+mutate(stbbi.pos = case_when(
+    hcv.pos %in% 1~1,
+    hiv.pos %in% 1~1,
+    syphilis.pos %in% 1 ~1,
+    T ~0),
+    TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos))  %>%
+   mutate_if(is.character, as.factor)
+
+## check
+
+summary(testing_set_imp)
+ncol(testing_set_imp) == ncol(training_set_imp)
+
+```
+
+## Y=HCV
+
+```{r}
+training_set_hcv <- training_set_imp_all %>% 
+  mutate(TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hiv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+
+summary(training_set_hcv)
+
+testing_set_hcv <- testing_set_imp_all %>% 
+  mutate(TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hiv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+## check
+
+summary(testing_set_hcv)
+```
+
+## Y=HIV/S
+
+```{r}
+training_set_hiv_s <- training_set_imp_all %>% 
+  mutate(hiv_s_pos = case_when(
+    hiv.pos %in% 1~1,
+    syphilis.pos %in% 1 ~1,
+    T ~0),TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+summary(training_set_hiv_s$hiv_s_pos)
+
+testing_set_hiv_s <- testing_set_imp_all%>% 
+  mutate(hiv_s_pos = case_when(
+    hiv.pos %in% 1~1,
+    syphilis.pos %in% 1 ~1,
+    T ~0),TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+summary(testing_set_hiv_s$hiv_s_pos)
+
+```
+
+## Y=HIV/HCV
+
+```{r}
+training_set_no_s <- training_set_imp_all %>% 
+  mutate(hcv_hiv_pos = case_when(
+    hcv.pos %in% 1~1,
+    hiv.pos %in% 1~1,
+    T ~0),
+    TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+
+summary(training_set_no_s$hcv_hiv_pos)
+
+testing_set_no_s <- testing_set_imp_all %>%
+mutate(hcv_hiv_pos = case_when(
+    hcv.pos %in% 1~1,
+    hiv.pos %in% 1~1,
+    T ~0),
+    TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos))  %>%
+   mutate_if(is.character, as.factor)
+
+## check
+
+summary(testing_set_no_s$hcv_hiv_pos)
+
+```
+
+## Y = HIV
+
+```{r}
+training_set_hiv <- training_set_imp_all %>% 
+  mutate(TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+
+summary(training_set_hiv)
+
+testing_set_hiv <- testing_set_imp_all %>% 
+  mutate(TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+## check
+
+summary(testing_set_hiv)
+```
+
+## CC
+
+```{r}
+training_set <- training_set %>% 
+  mutate(stbbi.pos = case_when( # create variable for STBBI positive if tested positive for HCV, HIV or syphilis
+    hcv.pos %in% 1~1,
+    hiv.pos %in% 1~1,
+    syphilis.pos %in% 1 ~1,
+    T ~0),
+    TypePastSTD = case_when( # reduce the number of categories for past type of STIs
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos)) %>%
+   mutate_if(is.character, as.factor)
+
+sum2<- summary(training_set)
+sum2
+
+testing_set <- testing_set %>%
+mutate(stbbi.pos = case_when(
+    hcv.pos %in% 1~1,
+    hiv.pos %in% 1~1,
+    syphilis.pos %in% 1 ~1,
+    T ~0),
+    TypePastSTD = case_when(
+      TypePastSTD %in% "None" ~ as.factor(TypePastSTD),
+      TypePastSTD %in% "6-Other" ~ "Not specified",
+      T ~ "Specified"
+    )) %>%
+  select(- c(new.hcv, new.syphilis, new.hiv, p_id, Date.Recruited, syphilis.pos, hcv.pos, hiv.pos))
+
+## check
+ncol(testing_set) == ncol(training_set)
+
+summary(testing_set)
+
+
+sum(training_set$stbbi.pos) + sum(testing_set$stbbi.pos)
+```
+:::
+
+#### differences between Imp and CC distribution
+
+```{r}
+
+diffPrint(sum1, sum2)
+```
+
+### Fitting a reference model
+
+#### Horseshoe priors
+
+::: panel-tabset
+## imp
+
+```{r}
+
+# variables
+xvar <- training_set_imp %>% select(-c(stbbi.pos)) %>% colnames()
+
+p0 <- 5 # number of relevant non-zero predictor coefficients 
+# Number of observations:
+N <- nrow(training_set_imp)
+# number of regression coefficients 
+D <- length(xvar)
+# Hyperprior scale for tau, the global shrinkage parameter (note that for the
+# Gaussian family, 'rstanarm' will automatically scale this by the residual
+# standard deviation):
+tau0 <- p0 / (D - p0) * 1 / sqrt(N)
+prior_hs <- horseshoe(scale_global = tau0)
+
+
+```
+
+## CC
+
+```{r}
+N2 <- nrow(training_set)
+tau0 <- p0 / (D - p0) * 1 / sqrt(N2)
+prior_hs_cc <- horseshoe(scale_global = tau0)
+
+```
+:::
+
+#### Reference model
+
+::: panel-tabset
+## Y=STBBI
+
+```{r, message = F}
+
+formula <- reformulate(setdiff(c(xvar), "stbbi.pos"), response = "stbbi.pos")
+
+
+# fit the model
+model_imp_hs <- brms::brm(formula,
+                   data = training_set_imp,
+                  family = bernoulli(link = "logit"),
+                   prior = set_prior(prior_hs),
+                  seed = 0901,
+                  verbose =F,
+                  refresh = 0) # prevent sampling progress to be printed
+model_imp_hs
+```
+
+## Y=HCV
+
+```{r}
+formula_hcv <- reformulate(setdiff(c(xvar), "hcv.pos"), response = "hcv.pos") 
+
+model_imp_hcv<- update(model_imp_hs, 
+        formula_hcv,  
+        newdata= training_set_hcv, 
+        verbose = F,
+        refresh = 0,
+        seed=0901)
+```
+
+## Y=HIV/S
+
+```{r}
+formula_hiv <- reformulate(setdiff(c(xvar), "hiv_s_pos"), response = "hiv_s_pos")
+
+model_imp_hiv_s<- update(model_imp_hs, 
+        formula_hiv,  
+        newdata= training_set_hiv_s, 
+        verbose = F,
+        refresh = 0,
+        seed=0901)
+```
+
+## Y=HIV/HCV
+
+```{r}
+formula_no_s <- reformulate(setdiff(c(xvar), "hcv_hiv_pos"), response = "hcv_hiv_pos")
+
+model_imp_no_s<- update(model_imp_hs, 
+        formula_no_s,  
+        newdata= training_set_no_s, 
+        verbose = F, 
+        seed=0901)
+
+```
+
+## Y = HIV
+
+```{r}
+formula_hiv <- reformulate(setdiff(c(xvar), "hiv.pos"), response = "hiv.pos") 
+
+model_imp_hiv<- update(model_imp_hs, 
+        formula_hiv,  
+        newdata= training_set_hiv, 
+        verbose = F, 
+        seed=0901)
+```
+
+## CC
+
+```{r}
+# set stbbi as response variable 
+formula <- reformulate(setdiff(c(xvar), "stbbi.pos"), response = "stbbi.pos")
+
+formula
+
+# fit the model
+model_hs_cc <- update(model_imp_hs, 
+        formula,  
+        newdata= training_set, 
+        verbose = F, 
+        prior= set_prior(prior_hs_cc),
+        seed=0901)
+
+```
+:::
+
+#### LOO measures
+
+Empty model
+
+::: panel-tabset
+## imp
+
+```{r}
+require(loo)
+model0_imp <- update(model_imp_hs, formula = stbbi.pos ~ 1,  verbose = F, seed=0901)
+
+loo0 <- loo(model0_imp, save_psis = TRUE)
+loo0
+```
+
+## CC
+
+```{r}
+model0_cc <- update(model_hs_cc, formula = stbbi.pos ~ 1,  verbose = F, seed=0901)
+loo0_cc <- loo(model0_cc, save_psis = TRUE, seed=0901)
+```
+:::
+
+::: panel-tabset
+## Y=STBBI
+
+```{r}
+loo_imp_hs <- loo(model_imp_hs, save_psis = TRUE, seed=0901)
+
+loo_imp_hs
+
+loo_compare(loo0, loo_imp_hs)
+```
+
+## Y=HCV
+
+```{r}
+loo_imp_hcv <- loo(model_imp_hcv, save_psis = TRUE, seed=0901)
+
+loo_imp_hcv
+
+loo_compare(loo0, loo_imp_hcv)
+```
+
+## Y=HIV/S
+
+```{r}
+loo_imp_hiv_s <- loo(model_imp_hiv_s, save_psis = TRUE, seed=0901)
+
+loo_imp_hiv_s
+
+loo_compare(loo0, loo_imp_hiv_s)
+```
+
+## Y=HIV/HCV
+
+```{r}
+loo_imp_no_s <- loo(model_imp_no_s, save_psis = TRUE, seed=0901)
+
+loo_imp_no_s
+
+loo_compare(loo0, loo_imp_no_s)
+```
+
+## Y = HIV
+
+```{r}
+loo_imp_hiv <- loo(model_imp_hiv, save_psis = TRUE, seed=0901)
+
+loo_imp_hiv
+
+loo_compare(loo0, loo_imp_hiv)
+```
+
+## CC
+
+```{r}
+
+loo_cc <- loo(model_hs_cc, save_psis = TRUE)
+
+loo_cc
+
+loo_compare(loo0_cc, loo_cc)
+
+
+```
+:::
+
+```{r}
+detach("package:loo", unload=TRUE)
+# check that it was removed or else the predictive projection will not work properly
+ (.packages()) 
+```
+
+### Posterior predictive check
+
+::: panel-tabset
+## Y=STBBI
+
+```{r}
+ref_obj_hs<- model_imp_hs
+
+prj_ref <- project(  
+  ref_obj_hs,    
+  verbose = F,
+  predictor_terms = xvar
+  )
+
+# turn into matrix 
+prj_mat <- as.matrix(prj_ref)
+
+# extract and clean the variable names
+
+col <- colnames(prj_mat)
+
+new_col<- str_replace_all(col, "(b_|\\d+-)| CAD", "") %>%
+  str_replace_all("(?<!\\b(?:HCV|HIV|STD|CAD))(?<=\\w)(?=[A-Z])|(?<=\\D)(?=\\d)", " ") %>% 
+  str_replace_all(" 2; 000", "2000") %>% 
+  str_replace_all("H I V", "HIV") %>% 
+  str_replace_all("H C V", "HCV") %>% 
+  str_replace_all("S T D", "STD")
+
+# to see the posterior distribution of each beta coefficient 
+mcmc_imp <- mcmc_areas(prj_mat)+
+  scale_y_discrete(label= new_col)+ # add new column names
+  xaxis_text(size= 20)+
+  yaxis_text(size = 20)
+
+mcmc_imp
+```
+
+## Y=HCV
+
+```{r}
+ref_obj_hcv<- model_imp_hcv
+
+prj_ref2 <- project(  
+  ref_obj_hcv,    
+  verbose = F,
+  predictor_terms = xvar
+  )
+
+prj_predict2 <- proj_predict(prj_ref2)
+
+# turn into matrix 
+prj_mat2 <- as.matrix(prj_ref2)
+
+# to see the posterior distribution of each beta coefficient 
+mcmc_imp2 <- mcmc_areas(prj_mat2)
+mcmc_imp2
+
+```
+
+Posteriors are similar
+
+## Y=HIV/S
+
+```{r}
+ref_obj_hiv_s<- model_imp_hiv_s
+
+prj_ref3 <- project(  
+  ref_obj_hiv_s,    
+  verbose = F,
+  predictor_terms = xvar
+  )
+
+prj_predict3 <- proj_predict(prj_ref3)
+
+# turn into matrix 
+prj_mat3 <- as.matrix(prj_ref3)
+
+# to see the posterior distribution of each beta coefficient 
+mcmc_imp3 <- mcmc_areas(prj_mat3)
+mcmc_imp3
+```
+
+posteriors are different
+
+## Y = HIV/HCV
+
+```{r}
+ref_obj_no_s<- model_imp_no_s
+
+prj_ref4 <- project(  
+  ref_obj_no_s,    
+  verbose = F,
+  predictor_terms = xvar
+  )
+
+prj_predict4 <- proj_predict(prj_ref4)
+
+# turn into matrix 
+prj_mat4 <- as.matrix(prj_ref4)
+
+# to see the posterior distribution of each beta coefficient 
+mcmc_imp4 <- mcmc_areas(prj_mat4)
+mcmc_imp4
+```
+
+similar to all except the model without HCV. This shows again that our results are mostly driven by HCV infections.
+
+## Y = HIV
+
+```{r}
+ref_obj_hiv<- model_imp_hiv
+
+prj_ref5 <- project(  
+  ref_obj_hiv,    
+  verbose = F,
+  predictor_terms = xvar
+  )
+
+prj_predict5 <- proj_predict(prj_ref5)
+
+# turn into matrix 
+prj_mat5 <- as.matrix(prj_ref5)
+
+# to see the posterior distribution of each beta coefficient 
+mcmc_imp5 <- mcmc_areas(prj_mat5)
+mcmc_imp5
+```
+
+## CC
+
+```{r}
+ref_obj_hs<- model_hs_cc
+
+prj_ref <- project(  
+  ref_obj_hs,    
+  verbose = F,
+  predictor_terms = xvar
+  )
+
+
+# turn into matrix 
+prj_mat <- as.matrix(prj_ref)
+
+# to see the posterior distribution of each beta coefficient 
+mcmc_cc <- mcmc_areas(prj_mat)
+mcmc_cc
+```
+:::
+
+### Variable selection
+
+Using 5 fold validation only and set search to 10 max
+
+::: panel-tabset
+## Y=STBBI
+
+```{r, fig.cap="Submodels accuracy using rapid variable selection. Y axis values represent the DIFFERENCE in performance with the reference model. The percentage below each submodel represents the cross-validation ranking of predictors"}
+cv_fits_imp <- run_cvfun(
+  model_imp_hs  # 5k is default
+)
+
+# Final cv_varsel() run:
+model_imp_nk <- cv_varsel(
+  model_imp_hs,
+  cv_method = "kfold",
+  cv_fits = cv_fits_imp,
+  method = "L1",
+  nterms_max = 10,
+  verbose = F
+)
+
+model_imp_nk
+
+plot_k5 <- plot(model_imp_nk, stats = "elpd", deltas = TRUE)
+plot_k5
+```
+
+## Y=HCV
+
+```{r}
+cv_fits_imp <- run_cvfun(
+  model_imp_hcv  # 5k is default
+)
+
+model_hcv <- cv_varsel(
+  model_imp_hcv, 
+  cv_method = "kfold",
+  cv_fits = cv_fits_imp,
+  method = "L1",
+  nterms_max = 10,
+  verbose = F
+)
+
+model_hcv
+
+plot(model_hcv, stats = "elpd", ranking_nterms_max = NA)
+```
+
+## Y=HIV/S
+
+```{r}
+cv_fits_imp <- run_cvfun(
+  model_imp_hiv_s  # 5k is default
+)
+
+model_hiv_s <- cv_varsel(
+  model_imp_hiv_s, 
+  cv_method = "kfold",
+  cv_fits = cv_fits_imp,
+  method = "L1",
+  nterms_max = 10,
+  verbose = FALSE, # remove the text
+)
+
+model_hiv_s
+
+plot(model_hiv_s, stats = "elpd", ranking_nterms_max = NA)
+```
+
+## Y = HIV/HCV
+
+```{r}
+cv_fits_imp <- run_cvfun(
+  model_imp_no_s  # 5k is default
+)
+
+model_no_s <- cv_varsel(
+  model_imp_no_s, 
+  cv_method = "kfold",
+  cv_fits = cv_fits_imp,
+  method = "L1",
+  nterms_max = 10,
+  verbose = FALSE, # remove the text
+)
+
+model_no_s
+
+plot(model_no_s, stats = "elpd", ranking_nterms_max = NA)
+```
+
+## Y = HIV
+
+```{r}
+cv_fits_imp <- run_cvfun(
+  model_imp_hiv  # 5k is default
+)
+
+model_hiv <- cv_varsel(
+  model_imp_hiv, 
+  cv_method = "kfold",
+  cv_fits = cv_fits_imp,
+  method = "L1",
+  nterms_max = 10,
+  verbose = F
+)
+
+model_hiv
+
+plot(model_hiv, stats = "elpd", ranking_nterms_max = NA)
+```
+
+## CC
+
+```{r}
+cv_fits_imp <- run_cvfun(
+  model_hs_cc  # 5k is default
+)
+
+
+model_cc<- cv_varsel(
+  model_hs_cc,
+  cv_method = "kfold",
+  cv_fits = cv_fits_imp,
+  method = "L1",
+  nterms_max = 10, # faster variable selection
+  verbose = FALSE, # remove interactive text
+)
+
+model_cc
+
+plot(model_cc, stats = "elpd", ranking_nterms_max = NA)  #no ranking based on cross-validation because no cross-validation in this variable selection
+
+```
+:::
+
+### Cross-validation results
+
+::: panel-tabset
+## Y=STBBI
+
+```{r}
+ranking_imp <- ranking(model_imp_nk)
+```
+
+The predictors are ranked in the following order: `r ranking_imp[["fulldata"]]`
+
+## Y=HCV
+
+```{r}
+ranking_hcv <- ranking(model_hcv)
+ranking_hcv[["fulldata"]]
+```
+
+## Y=HIV/S
+
+```{r}
+ranking_hiv_s  <- ranking(model_hiv_s)
+ranking_hiv_s[["fulldata"]]
+```
+
+## Y=HIV/HCV
+
+```{r}
+ranking_no_s  <- ranking(model_no_s)
+ranking_no_s[["fulldata"]]
+```
+
+## Y = HIV
+
+```{r}
+ranking_hiv <- ranking(model_hiv)
+ranking_hiv[["fulldata"]]
+```
+
+## CC
+
+```{r}
+ranking1 <- ranking(model_cc)
+ranking1[["fulldata"]]
+```
+:::
+
+### Select model
+
+Will examine all the different sections with the same number of models
+
+::: panel-tabset
+## Y=STBBI
+
+```{r}
+size <- suggest_size(model_imp_nk, stat = "elpd")
+
+
+predictors_final_imp <- head(ranking_imp[["fulldata"]], 9)  
+```
+
+The suggested size for the model is `r size` with the predictors in the following order `r predictors_final_imp`
+
+## Y=HCV
+
+```{r}
+size2 <- suggest_size(model_hcv, stat = "elpd")
+
+
+predictors_hcv<- head(ranking_hcv[["fulldata"]], 9) 
+predictors_hcv
+```
+
+The suggested size for the model is `r size2`
+
+## Y=HIV/S
+
+```{r}
+size3 <- suggest_size(model_hiv_s, stat = "elpd")
+
+
+predictors_hiv_s<- head(ranking_hiv_s[["fulldata"]], 9)
+predictors_hiv_s
+```
+
+The suggested size for the model is `r size3`
+
+## Y=HIV/HCV
+
+```{r}
+size4 <- suggest_size(model_no_s, stat = "elpd")
+
+
+predictors_no_s<- head(ranking_no_s[["fulldata"]], 9)
+predictors_no_s
+```
+
+The suggested size for the model is `r size4`
+
+## Y=HIV
+
+```{r}
+size5 <- suggest_size(model_hiv, stat = "elpd")
+
+
+predictors_hiv<- head(ranking_hiv[["fulldata"]], 9) 
+predictors_hiv
+```
+
+The suggested size for the model is `r size5`
+
+## CC
+
+```{r}
+predictors_final_cc <- head(ranking1[["fulldata"]], 9) # same size as for imputed dataset
+predictors_final_cc
+```
+:::
+
+### Prediction performance
+
+#### Training data
+
+::: panel-tabset
+## Y=STBBI
+
+```{r}
+# use the submodel function
+s1 <- submodels_train(model_imp_hs, predictor_ranking = predictors_final_imp, new_data = training_set_imp)
+
+
+# measure sensitivity, specificity and AUC using cindy's formula for all models
+s1
+
+#call colname in each tab 
+colnames <- c(paste0("model",1:length(predictors_final_imp)), "ref")
+
+s1.sens<- mult.sens(training_set_imp$stbbi.pos, s1) # 2000 iter default
+s1.sens
+
+s1.spec<- mult.spec(training_set_imp$stbbi.pos, s1) # 2000 iter default
+s1.spec
+
+s1.auc<- mult.auc(training_set_imp$stbbi.pos, s1)
+s1.auc
+
+submodels_perf <- bind_rows(s1.sens, s1.spec, s1.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "training", outcome="STBBI")
+
+```
+
+## Y=HCV
+
+```{r}
+s2_train<- submodels_train2(model_imp_hcv, predictor_ranking = predictors_hcv, new_data = training_set_hcv, outcome = "hcv.pos")
+
+colnames <- c(paste0("model",1:length(predictors_hcv)), "ref")
+
+
+s2.sens<- mult.sens(training_set_hcv$hcv.pos, s2_train) # 2000 iter default
+
+s2.spec<- mult.spec(training_set_hcv$hcv.pos, s2_train) # 2000 iter default2
+
+s2.auc<- mult.auc(training_set_hcv$hcv.pos, s2_train) # 2000 iter default
+
+submodels_perf2 <- bind_rows(s2.sens, s2.spec, s2.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "training", outcome="HCV")
+
+```
+
+## Y=HIV/S
+
+```{r}
+s3_train<- submodels_train2(model_imp_hiv_s, predictor_ranking = predictors_hiv_s, new_data = training_set_hiv_s,  outcome = "hiv_s_pos")
+
+colnames <- c(paste0("model",1:length(predictors_hiv_s)), "ref")
+
+s3.sens<- mult.sens(training_set_hiv_s$hiv_s_pos, s3_train) # 2000 iter default
+
+s3.spec<- mult.spec(training_set_hiv_s$hiv_s_pos, s3_train) # 2000 iter default
+
+s3.auc<- mult.auc(training_set_hiv_s$hiv_s_pos, s3_train) # 2000 iter default
+
+
+submodels_perf3 <- bind_rows(s3.sens, s3.spec, s3.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "training", outcome="HIV/S")
+
+```
+
+## Y=HIV/HCV
+
+```{r}
+s4_train<- submodels_train2(model_imp_no_s, predictor_ranking = predictors_no_s, new_data = training_set_no_s,  outcome = "hcv_hiv_pos")
+
+colnames <- c(paste0("model",1:length(predictors_no_s)), "ref")
+
+length(colnames) == length(predictors_no_s)+1 # make sure it is always the same size
+ 
+s4.sens<- mult.sens(training_set_no_s$hcv_hiv_pos, s4_train) # 2000 iter default
+
+s4.spec<- mult.spec(training_set_no_s$hcv_hiv_pos, s4_train) # 2000 iter default
+
+s4.auc<- mult.auc(training_set_no_s$hcv_hiv_pos, s4_train) # 2000 iter default
+
+
+submodels_perf4 <- bind_rows(s4.sens, s4.spec, s4.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "training", outcome="HIV/HCV")
+```
+
+## Y=HIV
+
+```{r}
+s5_train<- submodels_train2(model_imp_hiv, predictor_ranking = predictors_hiv, new_data = training_set_hiv,  outcome = "hiv.pos")
+
+colnames <- c(paste0("model",1:length(predictors_hiv)), "ref")
+
+length(colnames) == length(predictors_hiv)+1 # make sure it is always the same size
+ 
+s5.sens<- mult.sens(training_set_hiv$hiv.pos, s5_train) # 2000 iter default
+
+s5.spec<- mult.spec(training_set_hiv$hiv.pos, s5_train) # 2000 iter default
+
+s5.auc<- mult.auc(training_set_hiv$hiv.pos, s5_train) # 2000 iter default
+
+
+submodels_perf5 <- bind_rows(s5.sens, s5.spec, s5.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "training", outcome="HIV")
+```
+
+## CC
+
+```{r}
+
+# use the submodel function
+submodels_cc_train<- submodels_train(model_hs_cc, predictor_ranking = predictors_final_cc, new_data = training_set)
+
+
+submodels.sens.cc<- mult.sens(training_set$stbbi.pos, submodels_cc_train) # 2000 iter default
+
+
+submodels.spec.cc<- mult.spec(training_set$stbbi.pos, submodels_cc_train) # 2000 iter default
+
+
+submodels.auc.cc<- mult.auc(training_set$stbbi.pos, submodels_cc_train)
+
+submodels_perf_cc <- bind_rows(submodels.sens.cc, submodels.spec.cc, submodels.auc.cc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "training", outcome="cc")
+```
+:::
+
+Combine all values and save to plot later
+
+```{r}
+submodels_perf_fin <- bind_rows(submodels_perf, submodels_perf2, submodels_perf3, submodels_perf4, submodels_perf4, submodels_perf_cc)
+```
+
+#### Testing data
+
+We fit our submodels with testing data and extract the sensitivity, specificity and AUC
+
+::: panel-tabset
+## Y=STBBI
+
+```{r}
+s1_test<- submodels_test(s1, new_data = testing_set_imp)
+
+# measure sensitivity, specificity and AUC using cindy's formula for all models
+s1_test
+
+s1.sens<- mult.sens(testing_set_imp$stbbi.pos, s1_test) # 2000 iter default
+s1.sens
+
+s1.spec<- mult.spec(testing_set_imp$stbbi.pos, s1_test) # 2000 iter default
+s1.spec
+
+s1.auc<- mult.auc(testing_set_imp$stbbi.pos, s1_test)
+s1.auc
+
+submodels_perf <- bind_rows(s1.sens, s1.spec, s1.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "testing", outcome="STBBI")
+```
+
+## Y= HCV
+
+```{r}
+s2_test<- submodels_test(s2_train, new_data = testing_set_hcv)
+
+
+s2.sens<- mult.sens(testing_set_hcv$hcv.pos, s2_test) # 2000 iter default
+
+s2.spec<- mult.spec(testing_set_hcv$hcv.pos, s2_test) # 2000 iter default2
+
+s2.auc<- mult.auc(testing_set_hcv$hcv.pos, s2_test) 
+
+submodels_perf2 <- bind_rows(s2.sens, s2.spec, s2.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "testing", outcome="HCV")
+
+```
+
+## Y=HIV/S
+
+```{r}
+s3_test<- submodels_test(s3_train, new_data = testing_set_hiv_s)
+
+s3.sens<- mult.sens(testing_set_hiv_s$hiv_s_pos, s3_test) # 2000 iter default
+
+s3.spec<- mult.spec(testing_set_hiv_s$hiv_s_pos, s3_test) # 2000 iter default
+
+s3.auc<- mult.auc(testing_set_hiv_s$hiv_s_pos, s3_test) # 2000 iter default
+
+
+submodels_perf3 <- bind_rows(s3.sens, s3.spec, s3.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "testing", outcome="HIV/S")
+
+```
+
+Specificity remains very similar regardless of model size
+
+Model 2 now has the best AUC but all have acceptable AUC
+
+## Y=HIV/HCV
+
+```{r}
+s4_test<- submodels_test(s4_train, new_data = testing_set_no_s)
+
+ 
+s4.sens<- mult.sens(testing_set_no_s$hcv_hiv_pos, s4_test) # 2000 iter default
+
+s4.spec<- mult.spec(testing_set_no_s$hcv_hiv_pos, s4_test) # 2000 iter default
+
+s4.auc<- mult.auc(testing_set_no_s$hcv_hiv_pos, s4_test) # 2000 iter default
+
+
+submodels_perf4 <- bind_rows(s4.sens, s4.spec, s4.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "testing", outcome="HIV/HCV")
+```
+
+## Y = HIV
+
+```{r}
+s5_test<- submodels_test(s5_train, new_data = testing_set_hiv)
+
+ 
+s5.sens<- mult.sens(testing_set_hiv$hiv.pos, s5_test) # 2000 iter default
+
+s5.spec<- mult.spec(testing_set_hiv$hiv.pos, s5_test) # 2000 iter default
+
+s5.auc<- mult.auc(testing_set_hiv$hiv.pos, s5_test) # 2000 iter default
+
+
+submodels_perf5 <- bind_rows(s5.sens, s5.spec, s5.auc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "testing", outcome="HIV")
+```
+
+## CC
+
+```{r}
+submodels_cc_test<- submodels_test(submodels_cc_train, new_data = testing_set)
+
+
+submodels.sens.cc<- mult.sens(testing_set$stbbi.pos, submodels_cc_test) # 2000 iter default
+
+
+submodels.spec.cc<- mult.spec(testing_set$stbbi.pos, submodels_cc_test) # 2000 iter default
+
+
+submodels.auc.cc<- mult.auc(testing_set$stbbi.pos, submodels_cc_test)
+
+submodels_perf_cc <- bind_rows(submodels.sens.cc, submodels.spec.cc, submodels.auc.cc) %>% 
+  rename(model = rowname) %>%
+  mutate(performance = rep(c("sensitivity", "specificity", "auc"), each=length(colnames)),
+         data = "testing", outcome="cc")
+
+```
+:::
+
+```{r}
+# combine
+submodels_perf_fin <- bind_rows(submodels_perf_fin, submodels_perf, submodels_perf2, submodels_perf3, submodels_perf4, submodels_perf5, submodels_perf_cc)
+  
+#save
+
+write.csv(submodels_perf_fin, "3_intermediate/projpred/submodels_performance_SA_rev1.csv", row.names = F)
+```
+
+## **Reference:**
+
+Piironen J, Paasiniemi M, Catalina A, Weber F, Vehtari A (2023). "projpred: Projection Predictive Feature Selection." R package version 2.8.0, <https://mc-stan.org/projpred/>.
+
+See vignettes for more information

@@ -1,7 +1,18 @@
 
-## Functions for error rate, sensitivity, specificity and AUC
+# Functions for Bayesian clinical risk prediction model development and validation 
 
-## by Cindy Leu Soong
+# By Fio Vialard
+
+# includes functions for:
+# 1) Individual Bayesian sn, sp and AUC
+# 2) Multiple Bayesian sn, sp, AUC (using for loops of functions 1)
+# 3) Plots for histograms (single and grouped), counts 
+# 4) Measuring sn, sp, and AUC from training and testing datasets (using loops of functions 2) 
+# 5) Missing data histograms with p-value of test (for imputation)
+# 6) Prdiction matrix visualization of imputation 
+# 7) making quick 2 by 2 tables
+
+
 
 ## package 
 #install.packages("caret")
@@ -9,7 +20,9 @@ require(caret)
 require(pROC)
 require(arsenal)
 
-## ---- Functions for sn, sp, ER, AUC  ------------------------------------------------------------------
+## 1.Functions for sn, sp, ER, AUC  ------------------------------------------------------------------
+
+## by Cindy Leung Soo
 
 # Function for computing Error rate
 error.rate <- function(predictor, response){
@@ -57,7 +70,9 @@ bayes.spec <-
   }
 
 
-# Functions for multiple  -------------------------------------------------------
+# 2.Functions for multiple  -------------------------------------------------------
+## by Cindy Leung Soo
+
 
 # Sensitivity
 mult.sens<- function(outcome, l.pred){
@@ -134,7 +149,7 @@ for (i in 1:length(l.pred)) {
 return(l.ier)
 }
  
-# Plots -------------------------------------------------------------------
+# 3.Plots -------------------------------------------------------------------
 
 
 histo.plot <- function(data, xvar, label){
@@ -165,12 +180,15 @@ histo.plot.switch <- function(data, xvar, label){
   plot <- data.gather %>% 
     mutate(xvar = fct_reorder(xvar, count)) %>%
     ggplot(aes(x=xvar, y = count)) +
-    geom_bar(stat= "identity", fill = "lightblue") +
+    geom_bar(stat= "identity", fill = "#FFFFCCFF") +
     geom_text(label=data.gather$count, nudge_y = -0.5) +
     xlab(label) +
     ylab("Number of CRPMs")+
-    theme(axis.text = element_text(size=12),
-          axis.title = element_text(size=15))+
+    scale_y_continuous(breaks= seq(0,12, by=2), # add breaks at every 2 lines
+                       expand = expansion(mult = c(0, 0.05)),
+                       limits = c(0, 12))+ # remove floating bar
+    theme(axis.text = element_text(size=11),
+          axis.title = element_text(size=12))+
     coord_flip()
   
   return(plot)
@@ -198,7 +216,42 @@ count.plot <- function(data, variable, label){
 }
 
 
-# 3. sub-model eval -------------------------------------------------------
+grouped_plot <- function(data, variable, group, label, legend) {
+  # Group data and calculate counts
+  data.grouped <- data %>%
+    select({{ variable }}, {{ group }}) %>% # the {{ }} code is to ensure that the function treats the called variable as a column and not an object
+    group_by({{ variable }}, {{ group }}) %>%
+    summarise(count = n(), .groups = "drop") 
+  
+  # Calculate total stacked counts for each variable to reorder bars
+  data.grouped <- data.grouped %>%
+    group_by({{ variable }}) %>%
+    mutate(total_count = sum(count)) %>%
+    ungroup() %>%
+    mutate(xvar = fct_reorder({{ variable }}, total_count)) # Reorder by total count
+  
+  # Plot the data
+  plot <- data.grouped %>%
+    ggplot(aes(x = xvar, y = count, fill = {{ group }})) +
+    geom_bar(stat = "identity", position = "stack") +
+    geom_text(aes(label = count), 
+              position = position_stack(vjust = 0.75)) +
+    xlab(label) +
+    ylab("Number of CRPMs") +
+    scale_y_continuous(breaks = seq(0, 12, by = 2), # set number of breaks
+                       expand = expansion(mult = c(0, 0.05)), # remove the floating bar
+                       limits = c(0, 12))+ # set limits of axis
+    scale_fill_manual(values = c("#007FFFFF", "#4CC3FFFF", "#99EDFFFF"),
+                      name = legend) +
+    theme(axis.text = element_text(size = 11),
+          axis.title = element_text(size = 12),
+          legend.title=element_text(size=14, face = "bold"), # change the appearance of the legend
+          legend.text = element_text(size=12))+
+    coord_flip()
+
+  return(plot)
+}
+# 4. sub-model eval -------------------------------------------------------
 
 # create a function that re-fits the initial formula
 # we need the initial reference model, and the predictor ranking
@@ -279,7 +332,7 @@ submodels_test <- function(submodels_list, new_data){
 }
 
 
-# 4. Missing data corr graphs  --------------------------------------------
+# 5. Missing data corr graphs  --------------------------------------------
 
 
 get.correlation.site <- function(dataset = NA,
@@ -361,7 +414,7 @@ get.correlation.inf <- function(dataset = NA,
 }
 
 
-# 5. Prediction matrix for imputation -------------------------------------
+# 6. Prediction matrix for imputation -------------------------------------
 
 prediction.matrix <- function(imp.pred
 ){
@@ -388,7 +441,7 @@ prediction.matrix <- function(imp.pred
 
 
 
-# 6. 2 by 2 tables --------------------------------------------------------
+# 7. 2 by 2 tables --------------------------------------------------------
 
 # using arsenal package
 
