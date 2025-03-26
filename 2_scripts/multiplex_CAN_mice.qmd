@@ -1,0 +1,418 @@
+---
+title: "Multiplex Canada Multiple Imputations"
+format: 
+  html:
+    embed-resources: true
+editor: visual
+author: "Fio Vialard"
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "~/R files/multiplex canada") 
+# to ensure that the project is at the root directory
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, fig.width=12, fig.height=12, 
+                      message = F)
+```
+
+
+
+Using MICE to impute missing data of participants with one-level methods, site as one of the predictors used in the imputation and default prediction settings
+
+## Set-up
+
+### Packages
+
+```{r packages, message=FALSE}
+require(mice)
+require(lattice)
+require(tidyverse)
+require(gridExtra)
+require(pan)
+require(naniar)
+require(flextable)
+#install.packages("miceadds")
+require(miceadds)
+require(readxl)
+require(lme4)
+set.seed(123)
+theme_set(theme_bw())
+source("2_scripts/00_functions.R")
+```
+
+### Import dataset
+
+data without PROMs 
+```{r, import dataset 2}
+multiplex_no_prom <- read.csv("3_intermediate/missing_data/multiplex_na_final_no_prom.csv")
+head(multiplex_no_prom, 3)
+
+multiplex_no_prom <- multiplex_no_prom %>% 
+  select(!c(baseline.hcv:baseline.syph)) %>%
+ mutate(across(SexualActivity:Clinic.Location, as.factor)) %>% 
+  rename(WorkStatus = WorkStatusStatus, Date.Recruited = DateRecuit)
+
+multiplex_no_prom %>% 
+  select(-c(p_id, Date.Recruited)) %>%
+summary()
+```
+
+
+```{r, fig.cap= "Pattern of missingness for variables in the Canada multiplex dataset (without PROM). \nThe numbers on the left indicate the number of rows that have the same pattern of missingness. \nThe numbers on the right represent the number of missing data for each pattern. \nThe numbers at the bottom represent the total number of missing values for each variable with the total number of missing data in the dataset at the bottom right", purl=FALSE}
+
+pattern<- md.pattern(multiplex_no_prom, rotate.names = T)
+
+na.patterns.total<- nrow(pattern)
+```
+
+There are a total of `r na.patterns.total` patterns
+
+```{r, remove row with more than 2/3 NA}
+
+large.na<- as.integer(2/3*ncol(multiplex_no_prom))
+
+multiplex_no_prom <- multiplex_no_prom %>% 
+  mutate(na_count = rowSums(is.na(multiplex_no_prom))) %>%
+  filter(na_count < large.na) %>%
+  select(!na_count)
+
+```
+
+Create columns for clinic, stbbi status and missingness column to be populated later
+
+```{r, purl=FALSE}
+multiplex4plots <- multiplex_no_prom %>%
+  mutate(site = ifelse(Clinic.Location == "REZO", "REZO", "RECAP"), 
+         stbbi.pos = as.factor(ifelse(hcv.pos == 1| hiv.pos ==1 | syphilis.pos == 1, 
+                                      "Infected","Non-infected")),
+         missingness = NA)
+```
+
+### Does variable missingness depend on clinic?
+
+some variables depend on recruitment site
+
+```{r}
+variable <- colnames(multiplex4plots)[3:21]
+
+plots <-  get.correlation.site(multiplex4plots, variable, title = variable)
+
+```
+
+### Does variable missingness depend on infection status?
+
+some data depend on infection status
+
+9.  Age
+
+```{r, purl=FALSE}
+plot9 <- get.correlation.inf(dataset = multiplex4plots, 
+                             variable = multiplex4plots$Age, 
+                             title = "Age data")
+```
+
+10. Current partner
+
+```{r, purl=FALSE}
+plot10 <- get.correlation.inf(dataset = multiplex4plots, 
+                              variable = multiplex4plots$CurrentPartner, 
+                              title = "Current partner data")
+```
+
+11. sharing needles
+
+```{r, purl=FALSE}
+plot11 <- get.correlation.inf(dataset = multiplex4plots, 
+                             variable = multiplex4plots$ShareNeedles, 
+                             title = "Sharing needle data")
+```
+
+12. Condom use
+
+```{r, purl=FALSE}
+plot12 <- get.correlation.inf(dataset = multiplex4plots, 
+                             variable = multiplex4plots$CondomUse, 
+                             title = "Condom use data")
+```
+
+### Plots
+
+```{r, purl=FALSE}
+plots.per.site <- grid.arrange(plots[[1]], plots[[2]], plots[[3]],
+                               plots[[4]], plots[[5]], plots[[6]],
+                               plots[[7]], plots[[8]], plots[[9]],
+                               plots[[10]], plots[[11]], plots[[12]],
+                               plots[[13]], plots[[14]], plots[[15]],
+                               plots[[16]], plots[[17]], plots[[18]],
+                               plots[[19]],
+                               ncol=3)
+
+plots.per.status <- grid.arrange(plot9, plot10, plot11, plot12, ncol= 2)
+
+ggsave(plots.per.status, filename = "3_intermediate/missing_data/missingness_no_prom.png", device = png)
+
+ggsave(plots.per.site, filename = "4_outputs/missingness_site.png", 
+       device = "png", width = 14, height = 14)
+```
+
+There are more missing data at RECAP and in non-infected individuals. This pattern is MNAR. For variables with small number of missing data, the missing data does not depend on site or infection status.
+
+## Imputation
+
+### Plan
+
+```{r}
+param <- read_excel('1_data/parameters.xlsx')
+
+param.1l <- param %>% 
+  select(-c(`Proposed.imputation.method (2-level)`)) %>%
+  filter(Category!="Patient-reported")
+# table 
+param.1l |>
+  flextable(cwidth = 0.25) |> #turn into flextable object
+  merge_v(j=1) |> #Merge cells in first column with same value
+  theme_box() |> #Apply a theme for aesthetics
+  autofit() |>#automatically set column widths to reasonable values
+  fit_to_width(7.5) # size of the page
+```
+
+
+
+one-level imputation
+
+```{r  transform data for imputation 2}
+multiplex4imp2 <- multiplex_no_prom %>% 
+  mutate(site = as.integer(ifelse(Clinic.Location == "REZO", 0, 1))) %>% 
+  select(-c(Clinic.Location))
+
+summary(multiplex4imp2$site)
+
+summary(multiplex4imp2)
+```
+
+Using default methods (5 iterations). No cluster
+
+```{r, purl=FALSE}
+ini.imp <- mice(multiplex4imp2, nnet.MaxNWts = 2000, print = F)
+# adjust the weights to not get an error message
+# do not print the results
+```
+
+### Which variables were used as predictors?
+
+```{r, fig.cap= "Heatmap of predictor matrix. The columns are the variables predicted and rows show which value were acting as predictors. A value of 0 means no predicion occurred", purl=FALSE}
+ini.pred <- ini.imp$predictorMatrix
+
+prediction.matrix(ini.imp$predictorMatrix)
+```
+
+### What methods were used for each?
+
+```{r, purl=FALSE}
+ini.meth <- ini.imp$method
+ini.meth
+```
+
+## Transformation
+
+Transform the selected data to binary variables (see imputation plan)
+
+```{r transform to binary variables 2}
+multiplex4imp.1l2 <- multiplex4imp2 %>%
+  mutate(
+    SexualActivity = ifelse(
+      SexualActivity %in% c("2-I do not wish to answer", "0-No"), 
+      "0-No or no wish to answer", 
+      as.character(SexualActivity)
+    ),
+    CondomUse = ifelse(
+      CondomUse %in% c("1-Always", "2-Sometimes"), 
+      "1-Ever", 
+      as.character(CondomUse)
+    ),
+    SexualPartners = case_when(
+      SexualPartners %in% c("0-0", "1-1", "2-2 to 5") ~ "0 to 5",
+      SexualPartners %in% c("3-6 to 10", "4-11 or more") ~ "6 or more",
+      TRUE ~ as.character(SexualPartners)
+    ),
+    PastSTD = ifelse(
+     PastSTD  %in% c("2-I do not know", "0-No"), 
+      "0-No or do not know", 
+      as.character(PastSTD)
+    ),
+    PastInjectDrugs = case_when(
+      PastInjectDrugs %in% c("2-I do not wish to answer", "0-No")~ 
+      "0-No or no wish to answer",
+      PastInjectDrugs %in% "Yes"~ "1-Yes",
+      T~as.character(PastInjectDrugs)
+    ),
+    ShareNeedles = ifelse(
+      ShareNeedles %in% c("None", "0-No"),
+      "0-No",
+      as.character(ShareNeedles)
+    ),
+    Alcohol = ifelse(
+      Alcohol %in% c("1-1-2 times per week", "2-3-5 times per week"),
+      "1-5 times per week",
+      as.character(Alcohol)
+      ),
+      # across(c(PastHIVTest, PastHCVTest, PastSyphilisTest), 
+      #        ~ifelse(c(.) %in% c("2-Yes; 6 months to 1 year ago", 
+    #"3-Yes; more than 1 year ago"),
+      #                "more than 6 months ago", 
+      #                as.character(.))) 
+      # for now uncomment until we know how to deal with the variables
+    PastSyphilis = ifelse(
+     PastSyphilis %in% c("2-I do not know", "0-No"), 
+      "0-No or do not know", 
+      as.character(PastSyphilis)
+    ),
+    Age = case_when(
+      Age %in% c("1-18-24", "1-25-34") ~ "18 to 34",
+      Age %in% c("3-35-44", "4-45-54", "5-55 and above") ~ "35 and above",
+      TRUE ~ as.character(Age)
+    ),
+    Gender = ifelse(
+      Gender %in% "4-Bisexual",
+      NA,
+      as.character(Gender)
+    ),
+    Descent = case_when(
+      Descent %in% c("4-European/ North American") 
+      ~ "Non-Mediterranean European/North American",
+      !Descent %in% c("Non-Mediterranean European/North American", NA) 
+      ~ "Mediterranean European, African, Latin American, Caribbean and/or Asian",
+      TRUE ~ as.character(Descent)
+    ),
+   EducationStatus= ifelse(
+     !EducationStatus %in% c("4-Post-graduate degree", NA),
+     "No post-graduate degree",
+     as.character(EducationStatus)
+   ),
+   WorkStatus = case_when(
+     WorkStatus %in% c("1-Employed (full time)", "2-Employed (part time)") 
+     ~ "Currently employed",
+     !WorkStatus %in% c("Currently employed", NA) ~ "Not currently employed"
+   ),
+  MonthlyIncomeStatus = ifelse(
+    !MonthlyIncomeStatus %in% c("1-<$2;000 CAD", NA),
+    "$2000 CAD and above",
+    as.character(MonthlyIncomeStatus)
+  # ),
+  # PreferenceTiming = ifelse(
+  #   !PreferenceTiming %in% c("0-1 day", NA),
+  #   "2 days or more",
+  #   as.character(PreferenceTiming)
+  # ),
+  # RecommendRapidTests = ifelse(
+  #   RecommendRapidTests %in% c("0-No", "2-Not Sure"),
+  #   "No or not sure", 
+  #   as.character(RecommendRapidTests)
+  # ),
+  # PreferenceFollowup = case_when(
+  #  PreferenceFollowup %in% c("3-Face-to-face", "4-No preference")
+  #  ~ "No preference for digital follow-up",
+  #  !PreferenceFollowup %in% c("No preference for digital follow-up", NA)
+  #  ~"Digital follow-up",
+  #  TRUE ~ as.character(PreferenceFollowup)
+  )
+      ) %>%
+  mutate(across(SexualActivity:CurrentPartner, as.factor))
+
+summary(multiplex4imp.1l2)
+```
+
+### Run imputation with logistic regression for transformed factors
+
+```{r, warning=FALSE}
+mice.1l <- mice(multiplex4imp.1l2, nnet.MaxNWts = 2000, print = F)
+
+summary(complete(mice.1l))
+
+# save results 
+mice.1l.long<- complete(mice.1l, "long", include=TRUE)
+
+mice.1l.broad <- complete(mice.1l, "broad", include = T)
+
+write.csv(mice.1l.long, "3_intermediate/imputed/imputed_data_long_no_prom_1l.csv", row.names = F)
+
+write.csv(mice.1l.broad, "3_intermediate/imputed/imputed_data_broad_no_prom_1l.csv")
+```
+
+### Prediction matrix and methods
+
+```{r, purl=FALSE}
+prediction.matrix(mice.1l$predictorMatrix)
+
+meth.1l <- mice.1l$method
+meth.1l
+```
+
+The variables transformed into binary factors are now imputed using logistic regression
+
+### Diagnostic plots
+
+```{r, purl=FALSE}
+plot(mice.1l)
+```
+
+### add more
+
+```{r, purl = FALSE}
+mice.1l.20 <- mice.mids(mice.1l, nnet.MaxNWts = 2000, print =F, maxit=15)
+
+plot(mice.1l.20)
+```
+
+## Sensitivity analysis
+
+### Density plot of selected variables 1l imputation
+
+```{r fig.cap="density plot of the values selected observed variables (blue) and their corresponding imputed values (red).", message=FALSE, purl=FALSE}
+
+dplot1 <- densityplot(mice.1l, ~SexualActivity)
+  
+dplot2 <- densityplot(mice.1l, ~CondomUse)
+dplot3 <- densityplot(mice.1l, ~SexualPartners)
+dplot4 <- densityplot(mice.1l, ~PastSTD)
+dplot5 <- densityplot(mice.1l, ~TypePastSTD) 
+dplot6 <- densityplot(mice.1l, ~PastInjectDrugs)
+dplot7 <- densityplot(mice.1l, ~ShareNeedles)
+dplot8 <- densityplot(mice.1l, ~Alcohol) 
+#dplot9 <- densityplot(mice.1l, ~PastHIVTest) 
+dplot10 <- densityplot(mice.1l, ~PastSyphilisTest)
+
+dplots.clin <- grid.arrange(dplot1, dplot2, dplot3, dplot4, dplot5, dplot6,
+                       dplot7, dplot8, dplot10, ncol =2 )
+dplots.clin
+
+ggsave (dplots.clin, filename = "3_intermediate/imputed/Densityplots_observed_vs_1l-imputed_data_clinical_no_prom.png", 
+         device = "png", width = 14, height = 14)
+
+dplot11 <- densityplot(mice.1l, ~Age)
+dplot12 <- densityplot(mice.1l, ~Gender)
+dplot13 <- densityplot(mice.1l, ~Descent)
+dplot14 <- densityplot(mice.1l, ~EducationStatus)
+dplot15 <- densityplot(mice.1l, ~WorkStatus)
+dplot16 <- densityplot(mice.1l, ~MonthlyIncomeStatus)
+dplot17 <- densityplot(mice.1l, ~CurrentPartner)
+
+dplots.ses <- grid.arrange(dplot11, dplot12, dplot13, dplot14, dplot15, dplot16,
+                       dplot17, ncol =2)
+
+ggsave (dplots.ses, filename = "3_intermediate/imputed/Densityplots_observed_vs_1l-imputed_data_ses_no_prom.png", 
+         device = "png", width = 14, height = 14)
+
+all.dplots <- grid.arrange(dplot1, dplot2, dplot3, dplot4, dplot5, dplot6,
+                       dplot7, dplot8, dplot10, dplot11, dplot12, dplot13, dplot14, dplot15, dplot16,
+                       dplot17, ncol = 2)
+
+ggsave(all.dplots, filename = "4_outputs/density_1l_imp.png",
+       device = "png", width = 14, height = 20)
+```
+
+# References
+
+<https://www.rdocumentation.org/packages/mice/versions/3.16.0>
+
+**See vignettes for examples**
