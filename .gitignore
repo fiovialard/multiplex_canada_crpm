@@ -3,7 +3,4 @@
 .RData
 .Ruserdata
 local
-*.pdf
-*.html
 *.docx
-*.png
