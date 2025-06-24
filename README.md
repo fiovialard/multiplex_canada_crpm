@@ -4,7 +4,7 @@ Clinical sexually transmitted and blood-borne infection risk prediction model us
 
 This repository contains the code and outputs of a Clinical risk prediction model (CRPM) for sexually transmitted and blood-borne infections (STBBI) in Canadian key populations.
 
-The CRPM was developed and validated using Bayesian methods from a cross-sectional study on STBBIs conducted in Canada. The publication describing this model can be found with the following doi: [10.1136/sextrans-2024-056286](https://sti.bmj.com/content/early/2025/06/02/sextrans-2024-056286).
+The CRPM was developed and validated using Bayesian methods from a cross-sectional study on STBBIs conducted in Canada. The publication describing this model can be found with the following doi: [10.1136/sextrans-2024-056286](https://sti.bmj.com/content/early/2025/06/02/sextrans-2024-056286). The code that was used to generate this manuscript in R can also be found in this repository.
 
 **Please cite article as:**
 

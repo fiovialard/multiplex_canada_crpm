@@ -1,0 +1,911 @@
+---
+title: "Developing and validating a Bayesian clinical risk prediction model for three sexually transmitted infections in key populations from two Canadian provinces"
+execute: 
+  echo: false
+format:
+  docx: 
+    reference-doc: word-style-reference-manuscript.docx
+  html: default
+bibliography: bib_ref_rev.bib
+csl: bmj.csl
+editor: visual
+crossref: 
+  thm-title: "Table"
+  thm-prefix: "Table"
+  cor-title: "Table S"
+  cor-prefix: "Table S"
+  lem-title: "Figure S"
+  lem-prefix: "Figure S"
+  fig-title: "**Figure**"
+---
+
+```{=html}
+<!---
+
+NOTES:
+-   To render both word and HTML, type this into terminal
+
+quarto render 5_manuscript/manuscript.qmd
+
+-   There are limits in cross-referencing in Quarto. The table
+    Caption doesn't work well with flextable package, and 
+    There's no option for secondary (supplemental) series of 
+    tables or figures. As workaround, I've repurpose other
+    series (theorems, lemmas).I'm using
+        @thm- for tables (Table X)
+        @cor- for supplemental tables (Table SX)
+        @lem- for supplemental figures (Figure SX)
+  The space between "S" and the number for supplemental figures seems unavoidable
+   for now. Can manually correct before submitting to journal.
+        
+Flextable package isn't playing nicely with quarto for crossreferencing at the 
+moment, which is why I'm using @thm- to crossreference tables. But it's being
+actively worked on. To install latest package version, use 
+
+  devtools::install_github("davidgohel/flextable")
+  
+Issue threads:
+https://github.com/quarto-dev/quarto-cli/issues/1556
+https://github.com/davidgohel/flextable/issues/494
+
+Fio's notes:
+After rendering, will have to change formating of table 2 to double-page
+Because usually using endnote, make sure citations are turned to non-formatted text in word to avoid issues.
+Also add the indentation after
+May have to change citation style depending on journal for submission(csl)
+some last few edits were made right before submission, on the word document. May have to update it here during revisions. Also may have to look at the performance.csv document, I had updated it so results changed slightly (old version is in the drive)
+--->
+```
+Fio Vialard^1,2^, Qihuang Zhang^1,3^, Duncan Webster^4^, Stefanie Materniak^4^, Alexandre Dumont Blais^5^, Suma Nair^6^, Susan Bartlett^2,7^, Nitika Pant Pai^1,2,7^
+
+<br>
+
+^1^School of Population and Global Health, McGill University, Montreal, Canada.
+
+^2^Centre for Outcome Research and Evaluation, Research Institute of the McGill University Health Centre, Montreal, Canada.
+
+^3^Quantitative Life Sciences, McGill University, Montreal, Canada.
+
+^4^Infectious Disease Research Unit, Saint John Regional Hospital, Saint John, Canada, Saint John, Canada.
+
+^5^RÉZO, Montreal, Canada.
+
+^6^School of Public Health, DY Patil University, Navi Mumbai, India.
+
+^7^Department of Medicine, McGill University, Montreal, Canada.
+
+<br>
+
+Corresponding author: Dr. Nitika Pant Pai
+
+Key words: risk prediction models; sexually transmitted and blood-borne infections;
+
+key populations; Bayesian statistics; diagnostics.
+
+Running title: Bayesian clinical risk prediction model for sexually transmitted and blood-borne infections.
+
+Word count: 3000 (Max 3000)
+
+Reference number: 30 (Max 30)
+
+<br>
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "~/R files/multiplex canada", options(scipen=999))
+library(ggplot2) #plots
+library(data.table) #use datatables instead of frames
+library(scales) #format plot legends and text
+library(readxl) #read.excel
+library(flextable) #format tables for display
+library(tidyverse)
+library(mice)
+require(arsenal)
+#install.packages("effectsize")
+library(effectsize)
+#install.packages("arsenal")
+# library(ftExtra)
+# library(officedown) #formatting for word
+# library(officer)
+# library(stringr)
+theme_set(theme_bw())
+```
+
+```{r parameters}
+df_samp <- read_excel("1_data/parameters.xlsx", sheet = "parameters")
+
+df_1<- df_samp %>% select(-c(`Proposed.imputation.method (2-level)`)) %>%
+  filter(Category != "Patient-reported")  %>%
+  filter(Parameters!= "p_id"& Parameters!= "Date.Recruited") %>% 
+  mutate(Category = case_when(
+    Parameters %in% "Clinic.Location" ~ "Location",
+    T ~ as.character(Category)
+  )) %>%  slice(1:(n() - 3))
+
+n_param <- df_1 %>% 
+  filter(Category!="Test results") %>%
+  nrow()
+```
+
+```{r descriptive analysis}
+df_imp <- read.csv("3_intermediate/imputed/imputed_data_long_no_prom_1l.csv")
+imp.mids<- as.mids(df_imp)
+ 
+summary_list  <- imp.mids$data%>%
+    summarize(
+      n_recap = sum(site == 1),
+      n_rezo = sum(site == 0),
+      n_stbbi = sum(hiv.pos == 1 | syphilis.pos == 1 | hcv.pos == 1),
+      n_hiv = sum(hiv.pos == 1),
+      n_syph = sum(syphilis.pos == 1),
+      n_hcv = sum(hcv.pos == 1),
+      n_hcv_hiv = sum(hcv.pos == 1 & hiv.pos == 1),
+      n_hiv_syph = sum(hiv.pos == 1 & syphilis.pos == 1),
+      n_hcv_syph = sum(hcv.pos == 1 & syphilis.pos == 1),
+      new_hiv = sum(new.hiv == 1),
+      new_syph = sum(new.syphilis == 1),
+      new_hcv = sum(new.hcv == 1),
+      p_male = sum(Gender == "1-Male", na.rm = TRUE) / n() * 100,
+      p_fem = sum(Gender == "2-Female", na.rm = TRUE) / n() * 100,
+      p_trans = sum(Gender == "3-Transgender", na.rm = TRUE) / n() * 100,
+      p_35_plus = sum(Age == "35 and above", na.rm = TRUE) / n() * 100,
+      p_hiv_rezo = sum(hiv.pos == 1 & site == 0) / n_hiv * 100,
+      p_hcv_recap = sum(hcv.pos == 1 & site == 1) / n_hcv * 100,
+      p_syph_rezo = sum(syphilis.pos == 1 & site == 0) / n_syph * 100,
+      p_drugs_recap = sum(PastInjectDrugs == "1-Yes"& site==1, na.rm = TRUE)/n()*100,
+      p_drugs_rezo = sum(PastInjectDrugs == "1-Yes"& site==0, na.rm = TRUE)/n()*100
+    ) %>% 
+  as.list()
+
+cc <- na.omit(imp.mids$data)
+
+total_na <- sum(is.na(imp.mids$data))
+
+n_na <- nrow(imp.mids$data) - nrow(cc)
+```
+
+```{r model performance}
+# load data
+df_perf <- read.csv("3_intermediate/projpred/submodels_performance.csv")
+
+# number of models
+nmodel<- length(unique(df_perf$model))-1 # remove the full model
+
+# full model 
+full_d <- df_perf%>% 
+  filter(data=="training" & performance == "auc" & model == "ref")%>%
+  select(!c(model, data, performance)) %>%
+  round(.,digits = 2)
+
+full_d_value<- paste(full_d$Q50," ;89%CrI: ",full_d$Q5.5,"-", full_d$Q94.5, sep="")
+
+# sens & spec range
+d_values <- df_perf%>% 
+  filter(data=="training" & model != "ref") %>%
+  mutate(across(2:6, ~round(., digits=2))) %>%
+  group_by(performance) %>%
+  summarise(across(2:6, list(min = ~ min(.), max = ~ max(.))))
+
+d_min <- paste(d_values$Q50_min," (89%CrI: ",d_values$Q5.5_min,"-", min(d_values$Q94.5_min),")", sep="")
+
+names(d_min) <- d_values$performance
+
+d_max <- paste(d_values$Q50_max," (89%CrI: ",d_values$Q5.5_max,"-", d_values$Q94.5_max,")", sep="")
+
+names(d_max) <- d_values$performance
+
+#nmodels with acceptable AUC
+v_acc <- df_perf%>% 
+  filter(data=="training" & performance=="auc" &model!="ref") %>%
+  filter(Q50>=0.8)
+
+name_v_acc <- str_extract_all(v_acc$model, "[0-9]+") %>% unlist()
+
+
+# best performing model
+v_best <- df_perf%>% 
+  filter(data=="testing" & performance=="auc") %>%
+  filter(Q50==max(Q50))
+
+name_v_best <- v_best$model
+
+# get AUC, sensitivity and specificity
+v_best_values<- df_perf  %>% 
+  filter(data=="testing" & model==name_v_best)%>%
+  mutate(across(2:6, ~ format(round(., digits = 2), nsmall = 2)))
+
+# extract mean, and CrI for all 3
+output_best <-  paste(v_best_values$Q50," (89%CrI: ",v_best_values$Q5.5,"-", v_best_values$Q94.5,")", sep="")
+
+names(output_best) <- v_best_values$performance
+
+n_best <- str_extract_all(v_best$model, "[0-9]+") %>% unlist()
+
+# range
+v_values <- df_perf%>% 
+  filter(data=="testing" & model != "ref" & model != v_best$model) %>%
+  mutate(across(2:6, ~ format(round(., digits = 2), nsmall = 2))) %>%
+  group_by(performance) %>%
+  summarise(across(2:6, list(min = ~ min(.), max = ~ max(.))))
+
+v_min <- paste(v_values$Q50_min," (89%CrI: ",v_values$Q5.5_min,"-", min(v_values$Q94.5_min), ")", sep="")
+
+names(v_min) <- v_values$performance
+
+v_max <- paste(v_values$Q50_max," (89%CrI: ",v_values$Q5.5_max,"-", v_values$Q94.5_max, ")", sep="")
+
+names(v_max) <- v_values$performance
+```
+
+```{r final submodel}
+# load data 
+df_final <- read.csv("4_outputs/OR_final.csv")
+
+df_final <- df_final %>%
+  mutate(values=paste(df_final$Estimate," (89%CrI: ",df_final$Q5.5,"-", df_final$Q94.5, ")", sep="")) 
+
+
+```
+
+```{r sens analysis}
+df_sa <- read.csv("3_intermediate/projpred/submodels_performance_SA_rev1.csv")
+## CC best performing model
+v_best_cc <- df_sa%>% 
+  filter(data=="testing" & performance=="auc" & outcome=="cc") %>%
+  filter(Q50==max(Q50))
+
+name_v_best_cc <- v_best_cc$model
+
+v_best_values_cc<- df_sa  %>% 
+  filter(data=="testing" & model==name_v_best_cc & outcome=="cc")%>%
+  mutate(across(2:6, ~ format(round(., digits = 2), nsmall = 2)))
+
+output_best_cc <-  paste(v_best_values_cc$Q50," (89%CrI: ",v_best_values_cc$Q5.5,"-", v_best_values_cc$Q94.5, ")", sep="")
+
+names(output_best_cc) <- v_best_values_cc$performance
+
+n_best_cc <- str_extract_all(v_best_cc$model, "[0-9]+") %>% unlist()
+
+## HCV only best performing
+v_best_hcv <- df_sa%>% 
+  filter(data=="testing" & performance=="auc" & outcome=="HCV") %>%
+  filter(Q50==max(Q50))
+
+name_v_best_hcv <- v_best_hcv$model
+
+v_best_values_hcv<- df_sa  %>% 
+  filter(data=="testing" & model==name_v_best_hcv & outcome=="HCV")%>%
+  mutate(across(2:6, ~ format(round(., digits = 2), nsmall = 2)))
+
+output_best_hcv <-  paste(v_best_values_hcv$Q50," (89%CrI: ",v_best_values_hcv$Q5.5,"-", v_best_values_hcv$Q94.5, ")", sep="")
+
+names(output_best_hcv) <- v_best_values_hcv$performance
+
+n_best_hcv <- str_extract_all(v_best_hcv$model, "[0-9]+") %>% unlist()
+
+## HIV/S only best performing
+v_best_hiv_s <- df_sa%>% 
+  filter(data=="testing" & performance=="auc" & outcome=="HIV/S") %>%
+  filter(Q50==max(Q50))
+
+name_v_best_hiv_s <- v_best_hiv_s$model
+
+v_best_values_hiv_s<- df_sa  %>% 
+  filter(data=="testing" & model==name_v_best_hiv_s & outcome=="HIV/S")%>%
+  mutate(across(2:6, ~ format(round(., digits = 2), nsmall = 2))) # ensures 2 decimals are printed
+
+output_best_hiv_s <-  paste(v_best_values_hiv_s$Q50," (89%CrI: ",v_best_values_hiv_s$Q5.5,"-", v_best_values_hiv_s$Q94.5, ")", sep="")
+
+names(output_best_hiv_s) <- v_best_values_hiv_s$performance
+
+n_best_hiv_s <- str_extract_all(v_best_hiv_s$model, "[0-9]+") %>% unlist()
+
+## HIV/HCV best performing
+v_best_no_s <- df_sa%>% 
+  filter(data=="testing" & performance=="auc" & outcome=="HIV/HCV") %>%
+  filter(Q50==max(Q50))
+
+name_v_best_no_s <- v_best_no_s$model
+
+v_best_values_no_s<- df_sa  %>% 
+  filter(data=="testing" & model==name_v_best_no_s & outcome=="HIV/HCV")%>%
+  mutate(across(2:6, ~ format(round(., digits = 2), nsmall = 2))) # ensures 2 decimals are printed
+
+output_best_no_s <-  paste(v_best_values_no_s$Q50," (89%CrI: ",v_best_values_no_s$Q5.5,"-", v_best_values_no_s$Q94.5, ")", sep="")
+
+names(output_best_no_s) <- v_best_values_no_s$performance
+
+n_best_no_s <- str_extract_all(v_best_no_s$model, "[0-9]+") %>% unlist()
+
+
+```
+
+# Abstract
+
+Word count: 300 (Max 300)
+
+## Objectives
+
+Across Canada, in the last decade, incidence rates of sexually transmitted and blood-borne infections (STBBI) have peaked (syphilis) or plateaued (hepatitis C virus \[HCV\] and human immunodeficiency virus \[HIV\]). Key populations (gay, bisexual, and other men who have sex with men, trans- and gender-diverse people, and people who use injection drugs) are at greater risk for these STBBIs, so correctly predicting risk before screening potentially infected individuals is crucial. We developed and validated a diagnostic clinical risk prediction model (CRPM) that estimates HIV, HCV, and syphilis risk for two key populations in two Canadian provinces.
+
+## Methods
+
+We used `r n_param` variables and STBBI test results from a cross-sectional study evaluating multiplex testing (detection of co-infections) in New Brunswick and Quebec ($n=$ `r nrow(imp.mids$data)`) to develop our CRPM. We randomly split the data into development ($n=$ 300) and validation ($n=$ 100) datasets using clinic-stratified sampling. We used Bayesian predictive projection with development data to select ranked STBBI predictors. We obtained the odds ratios (OR) of the highest performing model measured as area under the receiver operating curve (AUC), sensitivity, and specificity with 89% Credible Intervals (89%CrI) using validation data. Analyses were performed in R ($≥$v4.2.3).
+
+## Results
+
+Out of `r nrow(imp.mids$data)` participants, `r summary_list$n_stbbi` were infected with HIV (n=`r summary_list$n_hiv`), HCV (n=`r summary_list$n_hcv`), and/or syphilis (n=`r summary_list$n_syph`). An internally validated submodel with two predictors (*Past drug injection*, *Type of past sexually transmitted infection*) displayed the highest AUC (`r output_best[["auc"]]`), sensitivity (`r output_best[["sensitivity"]]`), and specificity (`r output_best[["specificity"]]`). The predictor contributing most to STBBI risk was *Past drug injection* (OR = `r df_final$values[2]`).
+
+## Conclusions
+
+This Bayesian-based CRPM is the first to identify high-risk individuals for HIV, HCV, and syphilis with an overall good performance that minimizes case missing. After additional validation, it could serve as a promising novel tool for pre-screening key populations and improve Canadian STBBI multiplexed screening strategies.
+
+{{< pagebreak >}}
+
+# Key messages
+
+## What is already known on this topic
+
+-   Clinical risk prediction models (CRPM) to identify individuals at higher risk of sexually transmitted and blood-borne infections (STBBI) have been developed and validated mostly for human immunodeficiency virus (HIV) and have shown variable performance.
+
+-   In Canada, where STBBI incidence rates are currently rising or plateauing, only two frequentist statistics-based STBBI CRPMs have been developed to date, and neither targeted people who use injection drugs, gay, bisexual, and other men who have sex with men, or trans and gender diverse individuals of Quebec or New Brunswick.
+
+## What this study adds
+
+-   To our knowledge, we have developed and validated the first data-driven Bayesian statistics-based hepatitis C virus (HCV), HIV, and syphilis CRPM, which allowed us to obtain easily interpretable measures of uncertainty in the form of Credible Intervals (CrI).
+
+-   The final model had good overall performance (AUC: `r output_best[["auc"]]`) that achieved a high sensitivity (`r output_best[["sensitivity"]]`), despite having low specificity (`r output_best[["specificity"]]`). If implemented, it would reduce the probability of erroneously identifying high-risk individuals as low-risk, which is key in STBBI screening programs.
+
+## How this study might affect research, practice, or policy
+
+-   We present a promising novel tool for pre-screening individuals at high-risk for HIV, syphilis, and/or HCV that, after additional validation, has the potential to improve STBBI screening strategies if it is implemented in combination with targeted testing strategies in two distinct key populations.
+
+{{< pagebreak >}}
+
+# Introduction
+
+## Context and rationale
+
+In Canada, sexually transmitted and blood-borne infection (STBBI) incidence rates have either plateaued (e.g. human immunodeficiency \[HIV\], hepatitis C virus \[HCV\]) or increased (e.g. syphilis) in the last decade, with an estimated 63,000 people currently living with HIV and 246,000 people with HCV.[@PHAC2019] Syphilis, caused by *Treponema pallidum*, is experiencing an epidemic with 30 cases per 100,000, corresponding to a 178% increase over 10 years.[@PHAC2019] Although survival attributed to treatment has improved, HIV was still responsible for 104 deaths in 2018 and HCV had a case fatality rate of 7.4 per 100,000.[@PHAC2019; @PHACHIV2022]
+
+Additionally, individuals belonging to key populations are at greater risk of contracting STBBIs because they are often stigmatized and discriminated against, including when accessing healthcare services.[@MacClean2018] This situation increases their likelihood of avoiding healthcare services, where they would normally receive appropriate prevention, testing and treatment.[@MacClean2018] Consequently, up to 14 and 44% of people infected with HIV and HCV, respectively, are unaware of their status.[@PHAC2019] Gay, bisexual, and other men who have sex with men (gbMSMs) accounted for 43.8% of new HIV cases in 2020 and 71% of all male syphilis cases in 2021.[@Aho2022; @PHACHIV2022] People who use injection drugs (PWID) accounted for 46.1% of HCV seroprevalence in 2019.[@PHAC2019] No such data is available for trans- and gender-diverse (TGD) individuals. In addition, co-infections, during which these pathogens interact in ways that influence disease susceptibility, progression, and treatment outcomes, are common.[@PHAC2019]
+
+Standard asymptomatic (i.e. screening) and symptomatic testing strategies in Canada have not yet successfully reached these at-risk populations due to long turnaround time (TAT) and reliance on laboratory labour.[@HIVST2023; @Harrigan2021; @Karellis2022; @Miller2023] Although point-of-care (POC) technologies designed to facilitate comfort with testing or decrease TAT by accurately detecting multiple infections at once (e.g. multiplexed testing) are being introduced into screening programs, limitations based on linkage to care and reliance on confirmatory testing still remain.[@HIVST2023; @Harrigan2021; @Karellis2022; @Miller2023] Calls to develop, improve, and deploy these technologies have specified that to ensure effectiveness, they must be combined with methods to target those most at risk.[@PHAC2019]
+
+In this context, we used secondary data from a study evaluating a HIV, HCV, and syphilis multiplexed screening strategy to develop and validate a diagnostic clinical risk prediction model (CRPM) PWID and gbMSMs, and TGD invidivuduals from two distinct provinces.[@Karellis2024] CRPMs are statistical tools that can be employed by physicians or patients to estimate the probability of a specific health outcome based on patient characteristics.[@Collins2015] Current STBBI screening strategies would benefit from diagnostic CRPMs used as pre-screening tools to assist physicians in identifying those most at-risk.[@Ong2022] Acceptable CPRM performance, corresponding to an area under the receiver operating curve (AUC; a combined measure of sensitivity and specificity) above 0.80, is crucial to minimize the number of high-risk individuals erroneously not encouraged to test (i.e. false negative) and of low-risk individuals erroneously encouraged to do so (i.e. false positive).[@Ong2022] Existing STBBI CRPMs have mostly focused on HIV prediction and have shown variable performance (AUC: 0.49--0.89).[@Ong2022; @Jia2022; @Luo2023] Researchers described CRPMs developed and/or validated for other STBBIs (i.e. CT/NG and HCV) that showed variable performance (AUC:0.49--0.99).[@Falasinnu2014; @Cantor2021; @Moulaei2023] The vast majority of existing CRPMs have been developed using frequentist statistical methods with data-driven methods (i.e. Bayesian statistics and machine learning \[ML\]) being increasingly used.[@Moulaei2023; @Xu2022] Despite the predictive power of ML, its black-box nature often prevents intuitive result interpretation.[@Nichold2019]. We pursued a Bayesian framework that allows for a more intuitive interpretation of uncertainty through Credible Intervals (CrI).[@VandeSchoot2021] We previously developed a Bayesian-based HIV CRPM for individuals living in townships in South Africa with an AUC of 0.71 (89%CrI: 0.68-0.72).[@LeungSoo2023b] To our knowledge, only two STBBI CRPMs have been developed using Canadian data. Both employed frequentist methods, neither targeted key populations from these provinces, and only one was validated, highlighting limitations in CRPM data and methods.[@OByrne2021; @Ablona2021]
+
+## Objective
+
+Therefore, we aimed to develop and validate a diagnostic pre-screening CRPM that, if combined with multiplexed testing, could improve STBBI testing equity in Canadian key populations, especially PWID, gbMSMs, and TGD individuals..
+
+<br>
+
+# Methods
+
+We followed the transparent reporting of a multivariable prediction model for individual prognosis or diagnosis (TRIPOD) statement (Supplementary Checklist).[@Collins2015]
+
+## Data source
+
+We recruited `r nrow(imp.mids$data)+1` from a cross-sectional study conducted at a community health clinic for gbMSMs and TGD individuals who have sex with men in Quebec (RÉZO; $n=$ `r summary_list$n_rezo+1`) and a harm-reduction clinic for PWID in New Brunswick (RECAP; $n=$ `r summary_list$n_recap`), using convenience sampling.[@Karellis2024] We evaluated an app-assisted multiplexed testing strategy through which we screened participants for HIV, HCV, and syphilis using two immunological multiplexed tests and conducted confirmatory laboratory tests as per Canadian guidelines.[@PHAC2024] We extracted all available de-identified variables in the app's pre-test questionnaire (predictors) and confirmatory test results (outcome). Predictors corresponded to relevant STBBI risk factors collected by nurses in the primary study. Details on inclusion/exclusion criteria, key study dates, sample size calculations, app interface, and laboratory testing, are reported elsewhere.[@Karellis2024]
+
+## Model specifications
+
+We used participant self-reported categorical data as predictors without applying variable pre-selection for model development. We cross-checked testing history data with clinic records and when we found discrepancies, clinic records information was used. The outcome of interest was STBBI status (positive or negative). It was determined by positive confirmatory test results for HIV, HCV, and/or syphilis (incident or existing acute or chronic infection) and negative confirmatory test results for all three. We identified *new syphilis, HCV,* or *HIV infections* in participants testing positive who had no or unknown HIV, syphilis, or HCV infection status history, excluding those that had spontaneously cleared or had been treated for their HCV infections, when the information was available. Study staff were blinded to the outcome during predictor collection and laboratory staff were blinded to predictors and outcomes during confirmatory testing. All model metadata used in our analysis are described in @thm-1. Additional variable handling details are in Supplementary methods and sensitivity analysis.
+
+{{< pagebreak >}}
+
+::: {#thm-1}
+Clinical risk prediction model variables by category.
+
+```{r}
+tab_1 <- df_1 %>% # need to assign to create the different groups in which the table will be divided
+mutate(group= case_when(
+    Category %in% "Test results" ~ "Group99", # as 99 to ensure it comes lastor else Group10 gets grouped after Group1
+    Category %in% "Location"~ "Group1",
+    Proposed.transformation %in% "3-factor" ~ "Group2",
+    Category %in% "Clinical" & Proposed.transformation %in% "Binary" ~ "Group3",
+    Category %in% "Clinical" & Proposed.transformation %in% "None" ~ "Group4",
+    Category %in% "Individual" & Proposed.transformation %in% "None" ~ "Group5",
+    Category %in% "Individual" & Proposed.transformation %in% "Binary" ~ "Group6",
+    Category %in% "Socio-demographic" & Proposed.transformation %in% "None" ~ "Group7",
+    Category %in% "Behavioural" ~ "Group8",
+    T ~ "Group9"
+  )) %>%
+  group_by(group) %>%
+  summarize(across(.cols = c(1:2), .fns = ~paste(., collapse = ", ")), .groups = "drop") %>% # Category and parameter name into one column
+  mutate(Transformation = case_when( # rename each category
+    group %in% c("Group3", "Group6", "Group8", "Group9")  ~ "Binary",
+    group %in% "Group2" ~ "3-factor",
+    group %in% "Group99" ~ " Binary (STBBI positive)",
+    T~ "None"),
+    Imputation = case_when(
+      Transformation %in% "Binary" ~ "Logistic regression",
+      group%in% c("Group99", "Group1") ~ "None",
+      group%in% "Group7" ~ "Logistic regression",
+      T~ "Bayesian polytomous regression"
+    ),
+    Category=c("Location", rep("Testing history",3) , rep(c("Individual", "Behavioural"), each =2),  "Socio-demographic", "Test results") # rename the category in the right order
+  ) %>%
+   select(-group) 
+
+table_1 <- as_flextable(as_grouped_data(tab_1, groups = "Category"))
+
+table_1 <- fontsize(table_1, size = 11, part = "all")
+table_1 <- font(table_1, fontname = "Times", part = "all")
+table_1 <- theme_box(table_1)
+table_1 <- bg(table_1, bg = "#EAEAEA", part = "header")
+table_1 <- width(table_1, 1, 1.7)
+table_1 <- bg(table_1, i = c(1, 3, 7, 10,13, 15), bg = "#DDDDDD", part = "body") # starts at 1 not counting the header row 
+table_1 <- bold(table_1, i = c(1, 3, 7, 10, 13,15), part = "body")
+table_1 <- align(table_1, align = "left", part = "all")
+table_1<- set_table_properties(table_1, width = 1, layout = "autofit")
+
+table_1
+```
+:::
+
+{{< pagebreak >}}
+
+## Missing data
+
+We imputed `r total_na` missing data from `r n_na` individuals using *multiple imputation by chained equation* (MICE) implemented within the *mice* package.[@VanBuuren2018] We found no missing data for STBBI status. We excluded one individual from model development due to \>50% missing data. We observed that missing data pattern for some variables depended on clinic (@lem-1). Thus, we included *Clinic Location* as a dummy variable in the analysis and imputed data with the appropriate Bayesian regression (@thm-1).[@VanBuuren2018]We imputed data in five datasets, evaluated its validity, and pooled values for the remainder of the analysis (@lem-2 & Supplementary methods and sensitivity analysis).
+
+## Predictive projection
+
+With the pooled imputed datasets, we conducted variable selection by predictive projection (i.e. projection of the posterior of the full model onto each candidate submodel), a robust method for high-dimensional datasets (i.e. relatively small sample sizes compared to the number of variables).[@Piironen2020] We separated our data into development (i.e. training; $n=$ 300) and validation (i.e. testing; $n=$ 100) datasets using clinic-stratified random sampling to ensure representation of both sites in each set. We then fit the development data with a full Bayesian logistic regression reference model containing all predictors ($p=$ 20) and STBBI status as the outcome variable.[@Piironen2020] By including *Clinic.Location* in the full model, we adjusted it to account for differences and confounding in each key population. We assigned horseshoe priors ($\tau$ =0.02) for all coefficients, as described by Piironen et al.[@Piironen2020] We then selected the sparsest submodel with a performance equivalent to the full model, and reduced the CRPM complexity (Supplementary methods and sensitivity analysis).
+
+## Model evaluation
+
+We evaluated the predictive accuracy of the nine submodels with performances (i.e. estimated log predictive density \[ELPD\]) closest to the full model using a method independent from accuracy value thresholding. We computed sensitivity and specificity from 2000 draws of submodels posterior predictive distribution for *STBBI status*, and AUC from expected values of these draws. We quantified uncertainty using 89%CrIs to increase stability with effective sample sizes below 10,000 and to avoid confusion with 95% confidence intervals.[@Kruschke2014] We selected the final model with the best AUC obtained with the validation dataset. We then computed the odds ratio (OR) and associated 89% and 95%CrIs from each coefficient in the final fitted submodel to inform the contribution of each predictor to the final model.
+
+All analyses were done in R ($\geq$v4.2.3).[@R2021]
+
+## Sensitivity analysis
+
+In a sensitivity analysis, we examined differences in behaviour between incident and existing STBBI cases and compared results obtained with imputed data to those obtained with complete case data (n=`r nrow(cc)`). We also compared the final CRPM with CRPMs developed with HIV/syphilis, HIV/HCV, and HCV as outcomes (*Supplementary methods and sensitivity analysis*).
+
+<br>
+
+# Results
+
+## Participant recruitment and characteristics
+
+In the original study, we recruited `r nrow(imp.mids$data)` from RÉZO ($n=$`r summary_list$n_rezo`) and RECAP ($n=$`r summary_list$n_recap`), excluding the removed individual. Most participants (`r summary_list$p_male`%) self-identified as male, with `r summary_list$p_fem`% as female and `r summary_list$p_trans`% as transgender. Nearly half of all participants (`r summary_list$p_35_plus`%) were 35-year-old and above. We identified `r summary_list$n_stbbi` STBBIs, corresponding to `r summary_list$n_hiv` HIV, `r summary_list$n_syph` syphilis and `r summary_list$n_hcv` HCV infections. Of these, `r summary_list$n_hcv_hiv + summary_list$n_hiv_syph + summary_list$n_hcv_syph` were co-infections (`r summary_list$n_hcv_hiv` HCV/HIV and `r summary_list$n_hiv_syph` HIV/syphilis) and `r summary_list$new_hiv+summary_list$new_syph+summary_list$new_hcv` were new infections. Additional details about the study, visit procedures, multiplexed test results, and treatments are described elsewhere.[@Karellis2024]
+
+Due to key population differences in density, risk factors, and needs, RECAP had a greater proportion of HCV infections (`r round(summary_list$p_hcv_recap, digits =2)`%) while RÉZO had a greater proportion of HIV (`r summary_list$p_hiv_rezo`%) and syphilis (`r summary_list$p_syph_rezo`%) infections. RECAP also had a greater proportion of individuals reporting using injection drugs in the past (`r summary_list$p_drugs_recap`%) than RÉZO (`r summary_list$p_drugs_rezo`%). We also observed differences in gender, descent, education, income, and work status by clinic*.* The distribution of each characteristic by clinic is outlined in @cor-1 for the development and validation datasets.
+
+The outcome (i.e. *STBBI status*) was similarly distributed between the development (17% positive cases) and validation datasets (20% positive cases). The distributions of variables in the pooled imputed datasets ($m=$ 5) are shown in @cor-2.
+
+## The submodels reached the predictive performance of the full model with nine ranked variables
+
+To develop a simple CRPM with a reduced number of predictors of STBBI infection, a sample size of 300 was sufficient to use predictive projection feature selection on a full model with all predictors ($p=20$).[@Piironen2020] We found that most of the predictor's posteriors in the full model had CrIs spanning the null due to horseshoe prior effects (@lem-3).
+
+Based on predictor ranking agreement between cross-validation folds (@lem-4), we identified the `r nmodel` sparsest submodels with ELPD closest to the reference model. As expected, when we fitted each submodel with the development dataset, the AUC increased as the number of predictors increased, until reaching the value of the full model (AUC = `r full_d_value`) (@fig-1). Submodels `r name_v_acc[[1]]` to `r name_v_acc[[nrow(v_acc)]]` had an acceptable AUC (\>0.80). The sensitivity remained very similar, between `r d_min[["sensitivity"]]` and `r d_max[["sensitivity"]]`), and so did the specificity, between `r d_min[["specificity"]]` and `r d_max[["specificity"]]`, across all submodels (@lem-5).
+
+## The submodel with two predictors had the best performance with the validation dataset
+
+When we fit these submodels with the internal validation dataset ($n=$ 100), we found that the submodel with *Past drug injection* and *Type of past STI test* only had the best performance with an AUC of `r output_best[["auc"]]`, a sensitivity of `r output_best[["sensitivity"]]` and a specificity of `r output_best[["specificity"]]` (@fig-1 & @lem-5). All other submodels had AUC values of `r v_min[["auc"]]` to `r v_max[["auc"]]` and similar values for sensitivity (`r v_min[["sensitivity"]]` to `r v_max[["sensitivity"]]`) and specificity (`r v_min[["specificity"]]` to `r v_max[["specificity"]]`).
+
+The predictor with the strongest effect on STBBI risk (i.e. indicating a positive diagnosis) was *Past drug injection* (OR=`r df_final$values[2]`) (@fig-2).
+
+## Sensitivity analysis
+
+We found little to no difference in behavioural variables' distributions between incident and existing STBBI cases (@cor-3), that the imputation was successful, and some differences in prediction depending on the STBBI of interest (*Supplementary methods and sensitivity analysis*).
+
+## Using the final model
+
+To use the final model, physicians should input patient *Past drug injection* (i.e. Yes or No) and *Type of past STI test* (i.e. Specified, Unspecified, or None) information. The CRPM will then output a risk probability and they can decide whether or not to offer testing (@thm-2).
+
+{{< pagebreak >}}
+
+::: {#thm-2}
+Risk of sexually transmitted or blood-borne infection (STBBI) by predictor in the final model (p=2).
+
+```{r}
+df_final_log<- df_final %>% 
+  mutate(across(2:7, ~log(.))) %>% 
+  select(!c(Est.Error, values))
+
+# based on the following equation: stbbi risk = int + coef1*PastInject + coef2*PastSTDunspecified + coef3*PastSTI*Specified
+
+
+# compute different scenarios with this function
+sum_rows <- function(df, rows, cols) {
+  # Calculate the sum for each column specified in cols for the rows specified in rows
+  s <- sapply(df[cols], function(x) sum(x[rows]))
+  return(s)
+}
+
+# each time for these colums
+cols <- c("Estimate", "Q5.5", "Q94.5")
+
+
+s1 <- sum_rows(df_final_log, 1, cols)
+s2 <- sum_rows(df_final_log, c(1,2), cols)
+s3 <- sum_rows(df_final_log, c(1,3), cols)
+s4 <- sum_rows(df_final_log, c(1,4), cols)
+s5 <- sum_rows(df_final_log, c(1,2,3), cols)
+s6 <- sum_rows(df_final_log, c(1,2,4), cols)
+
+
+scenarios <- s1 %>% 
+  bind_rows(s2, s3, s4, s5, s6)
+
+history <- c("No", "Yes", rep(c("No","Yes"),each=2))
+past.sti <- c(rep("None",2), rep(c("Unspecified", "Specified"),2))
+
+#combine and transform to odds
+tab_3_odds<- cbind(history, past.sti, scenarios) %>% 
+  mutate(across(3:5, ~ exp(.)))
+
+# transform to prob and round
+tab3_prob <- tab_3_odds %>%
+  mutate(across(3:5, ~format(round(odds_to_probs(.), digits = 2), nsmall = 2)))
+
+# finalize table
+tab_3 <- tab3_prob %>%
+  mutate(STBBI.risk = paste(Estimate," (",Q5.5,"-", Q94.5, ")", sep="")) %>% 
+  select(!c(3:5)) %>%
+  rename("Past drug injection" = history, 
+         "Type of Past STI test"= past.sti,
+         "STBBI risk (89%CrI)"= STBBI.risk)
+
+table_3 <- flextable(tab_3)
+
+# format
+table_3 <- fontsize(table_3, size = 11, part = "all")
+table_3 <- font(table_3, fontname = "Times", part = "all")
+table_3 <- theme_box(table_3)
+table_3 <- bg(table_3, bg = "#EAEAEA", part = "header")
+table_3 <- width(table_3, 1, 1.7)
+table_3 <- align(table_3, align = "left", part = "all")
+table_3<- set_table_properties(table_3, width = 1, layout = "autofit")
+
+table_3
+```
+:::
+
+<br>
+
+# Discussion
+
+## Interpretation
+
+Overall, the results obtained with the validation dataset had a slightly lower performance and greater uncertainty than those obtained with the development dataset. A final CRPM with a nearly acceptable AUC (i.e. 0.79) is encouraging considering that it would be utilized as a pre-screening tool to identify high-risk individuals and offer them testing.[@Ong2022] We obtained higher AUC measures than with a HIV CRPM that we previously developed using South African data, albeit greater uncertainty due to a smaller sample size.[@LeungSoo2023b] In addition, these validation values are on the higher end of existing STBBI CRPMs and include uncertainty measures which are often lacking.[@Ong2022; @Jia2022; @Luo2023; @Moulaei2023; @Xu2022] In addition, unlike with most existing ML models, sensitivity was always higher than specificity, resulting in fewer false positives than false negatives.[@Moulaei2023]
+
+PWID are known to be at higher risk of acquiring HCV.[@PHAC2019] Thus, due to numerous HCV positive results in our dataset (n=`r summary_list$n_hcv`), a CRPM with *Past drug injection* as the most important predictor performed as expected. It was also identified as an important predictor of STI risk in another existing Canadian CPRMs but its predicting ability was not quantified.[@OByrne2021] Predictor ranking only differed when we removed HCV cases, which may indicate that the final CRPM will perform better when a HCV infection is present.
+
+## Strengths and limitations
+
+To our knowledge, we developed and validated the first Bayesian statistics-based HCV, HIV, and syphilis CRPM. Using this approach allowed us to incorporate sparsity assumptions into our model with horseshoe priors and to output easily interpretable uncertainty probability measures (i.e. CrIs).[@VandeSchoot2021] Using predictive projection, we obtained a simple model containing two predictors, which will be useful in rapidly identifying high-risk individuals who would benefit from STBBI testing. Unlike other previously developed CRPMs, we validated our CRPM internally using cross-validation with the development dataset and through random-splitting of our initial dataset.[@Collins2015; @Falasinnu2014; @Ong2022; @Luo2023; @Jia2022; @Moulaei2023] In addition, the performance of candidate submodels based on draws of the posterior distribution allowed us to use a threshold-independent calculation of the sensitivity, specificity and AUC. Threshold-based measures of sensitivity and specificity can often be assigned arbitrarily and are decided based on very specific clinical context that can impact generalizability.[@Wynants2019]
+
+Although a single joint model that predicts risk in two key populations with overlapping risk factors and infections has merit, the limited data source size obtained from two heterogeneous populations could have impacted its validity. To address the small sample size, we employed a method that generates robust models from scarce datasets.[@Piironen2020] To address the heterogeneity, we considered developing a separate model for each population. However, the limited sample size and numerous missing data in the RECAP dataset prevented this, because MICE is not robust with high proportion of missing values. Instead, we accounted for key populations differences with the *Clinic.Location* variable in each step of our analysis, including in the reference model, where it accounts for the inter-population heterogeneity. Grouping incident and existing cases as positive cases may have led to confounding bias from difference in behaviours between those with and without awareness of their status. However, the distribution of most behavioural variables did not differ between these two groups. In practice, a low-specificity CRPM could lead to labour, psychological, and monetary costs associated with low-risk individuals encouraged to test.[@WHO2020] However, low specificity is preferable to low sensitivity by minimizing the number of missed high-risk individuals for targeted testing.[@WHO2020] By sourcing data from a cross-sectional primary study, using convenience sampling conducted in urban centres, any bias resulting from the selection of participants that frequently visit these clinics may have impacted the generalizability of our results.[@Karellis2024] Despite using rigorous imputation methods, we are not guaranteed that missing data followed the same pattern as observed data. Additionally, residual confounding may have been introduced by the grouping of variables and from uncollected variables (e.g. partner STBBI status). The absence of methods to incorporate co-infection mechanisms in our final model may limit its predictive accuracy for co-infected individuals. We could consider a multivariable regression to jointly model the correlated risks of co-infections in the future. Finally, apart from testing history, for which we had clinic records available, app-based predictor data was self-reported from an interview with a nurse which may have been impacted by social-desirability bias. However, in practice, CRPM users will have to declare their information to the healthcare provider to receive their risk probability.
+
+## Implications
+
+Our results are aligned with Canadian elimination targets for three STBBIs and calls to improve current screening strategies.[@PHAC2019] By providing a validated CRPM specific to two key populations in two Canadian provinces, with acceptable performance, we are providing decision-makers with a novel pre-screening tool that can be used in combination with targeted testing strategies to improve multiplexed testing initiatives for these populations. Currently, any individual belonging to a key population is encouraged to test frequently, with less emphasis on their individual risk, and the monetary and time costs of all administered tests constitutes a major deterrent to upscaling initiatives. A simple CRPM that can identify those at truly greater HIV, HCV and/or syphilis risk within those populations while minimizing case missing can assist healthcare providers determine when to test on an individual basis and decrease overall costs. In the future, we plan to conduct additional validation and updating in other global populations that would benefit from targeted STBBI screening (e.g. rural populations in India), which we will source from larger homogenous study populations using a sampling method less prone to bias, with incident cases, more syphilis cases, and including mechanisms of co-infections, to confirm our model's performance in key populations and improve on the current limitations of our CRPM.
+
+In addition, costs required for successful implementation and maintenance of a good performing CRPM do not guarantee an improved cost-effectiveness compared to current screening strategies.[@vanGiessen2017] Thus, our CRPM would benefit from a future cost-effectiveness analysis.
+
+Finally, assigning risk to an individual can be stigmatizing and depends on the CRPM user's willingness to share their information with healthcare providers. Therefore, our CRPM should be evaluated by members of the targeted community to ensure use of inclusive and appropriate language before implementation.
+
+In conclusion, we have developed and validated a promising novel tool to pre-screen individuals at high-risk for three STBBIs with the potential to improve screening strategies. After additional validation and evaluation, the CRPM could be used to identify and encourage high-risk individuals to use multiplexed screening interventions for HCV and related co-infections.
+
+{{< pagebreak >}}
+
+# Declarations
+
+Funding: This study was funded by the Canadian Institutes of Health Research (grant PJT153149). The study sponsor had no role in study design, collection, analysis, and interpretation of data; in the writing of the report; and in the decision to submit the paper for publication. NPP acknowledges support from the Fonds de recherche du Québec - Santé (Senior Scientist award 252845, Distinguished Research Scholar award 324154) and the India-Canada Centre for Innovative Multidisciplinary Partnerships to Accelerate Community Transformation and Sustainability (IC-IMPACTS; CNO 3072).
+
+FV is funded by a Fonds de recherche du Québec - Santé Master's Training scholarship.
+
+Conflicts: We have no conflict of interest to declare.
+
+Ethics/Consent: We obtained ethics approvals from the Research Institute of the McGill University Health Centre (protocol number: 2020-6048) and from the Horizon Health Network Research Ethics Board at the Saint John Regional Hospital (protocol number: 2020-2963).
+
+Data and materials: To protect participants privacy, individual-level data is not available at this time. Descriptive statistics of all relevant variables before and after imputation are available as supplementary material.
+
+Code availability: All scripts that were generated for data wrangling, imputation, and modeling have been uploaded to GitHub and are publicly available (https://github.com/fiovialard/multiplex_canada_crpm).
+
+Authors' contributions: NPP conceived and designed the project. Data was obtained from a cross-sectional study evaluating multiplexed testing in Canada. DW, SM, and ADB were responsible for participant recruitment and data collection. FV cleaned, prepared, and imputed the data with guidance from QZ and NPP. FV developed and validated the reference model and submodels with guidance from QZ. QZ verified the codes and data. NPP, QZ, SB, and SN contributed to results and provided extensive feedback to contextualize findings. FV wrote the first manuscript draft and all authors read and approved the final manuscript.
+
+Acknowledgements: The authors would like to thank Melisa Eraslan for her help with the manuscript uploading process and Cindy Leung Soo for her guidance on coding for risk prediction modeling. The authors also extend their gratitude to the participants of the AideSmart! study, who donated their time and information and the study staff, for meticulously collecting this data.
+
+{{< pagebreak >}}
+
+# References
+
+::: {#ref}
+:::
+
+{{< pagebreak >}}
+
+# Figures
+
+```{r}
+#| label: fig-1
+#| fig-cap: "Area under the receiving operating characteristic curve (AUC) of nine sub-models and the full reference model (p=20) fitted with the development (blue; n=300) and validation (purple; n=100) datasets. We measured AUC based on the values of expected STBBI status based on 2000 samples drawn from the posterior predictive distributions. On the x-axis, each predictor named represents the submodel containing it and all predictors to its left. The reference model contains all available predictors. The AUC of the submodels fitted with the development (i.e. training) dataset increased by submodel size whereas the submodel containing two predictors had the highest performance when fitted with the validation (i.e. testing) dataset. Each point represents the median and each line represent 89% Credible Intervals of the variation in expected STBBI status values obtained from each predictor present in each model."
+
+knitr::include_graphics("4_outputs/auc.png")
+
+```
+
+{{< pagebreak >}}
+
+```{r}
+#| label: fig-2
+#| fig-cap: "Median, 89% (thick segment) and 95% Credible Intervals (thin segment) of estimated odds ratio (OR) for the intercept and each predictor of STBBI status in the final submodel (p=2) fitted with the validation (i.e. testing) set (n=100) based on 2000 draws of the predictive distribution. The vertical line represents null effect (OR=1.0)"
+knitr::include_graphics("4_outputs/OR_final_model.png")
+```
+
+{{< pagebreak >}}
+
+# Supplementary materials
+
+<br>
+
+## Supplementary TRIPOD checklist
+
+\[Will insert the supplemental checklist here.\]
+
+{{< pagebreak >}}
+
+## Supplementary methods and sensitivity analysis
+
+### Model specification details
+
+We transformed all categorical (i.e. 2-6) variables into binary factors except for *Gender* and *Type of past STI test.* The gender of seven participants was misclassified as bisexual during the data gathering process which we re-classified as missing.
+
+### Multiple imputation by chained equation details
+
+To assess the legitimacy of the method, we examined chain convergence with 20 datasets and density plots of observed compared to imputed data, which we found to be acceptable (@lem-2).
+
+### Predictive projection details
+
+Predictive projection is a Bayesian method that projects the posterior of a full model containing all variables onto multiple candidate submodels, to identify those with the highest-ranked predictors in each cross-validation and select the sparsest submodel with a performance equivalent to the full model. It was implemented within the *brms* and *projpred* packages.[@Burkner2021; @Piironen2023]
+
+We refer to datasets used for training and testing our model as development and validation datasets to remain consistent with TRIPOD recommendations.[@Collins2015]
+
+We evaluated the reliability of MC estimates using Pareto-k diagnostic using leave-one out (LOO) cross-validation within the *loo* package.[@Vehtari2023] We found acceptable Pareto-k values (i.e. \>0.5) and convergence ($\widehat{r}=$ 1) for all predictors. We ran the model with four Monte Carlo (MC) chains of 2000 iterations each (1000 warm-up iterations).
+
+We chose horseshoe priors because they are shrinking priors that can be used under the assumptions that most parameters will have small effects while others will have larger non-zero effect set by the scale parameter defined as: $\tau = p_0 / (D - p_0) \times 1 / \sqrt{N}$ with $p_0$ as the number of non-zero predictor coefficient, $N$ as the sample size, and $D$ as the number of coefficients. Following recommendations from the authors, we specified $p_0=5$.[@Piironen2020]
+
+### Sensitivity analysis
+
+To determine whether participants with existing cases of HCV, syphilis, and/or HIV behaved differently to those without knowledge of their infection status, we stratified the positive participants by incident or existing case and conducted a t-test of proportions for behavioural variables. We found no difference in behavioural parameters proportions between incident and existing HIV, HCV, or syphilis cases except for *Sexual activity* in incident HIV cases but this may have been due to our limited sample size (@cor-3).
+
+The complete case analysis (n=`r nrow(cc)`) had a similar distribution of predictors and the same number of infections as the imputed data. After model development, we observed differences in predictor ranking, but the two most important predictors were unchanged, suggesting a successful imputation. In addition, the highest performing submodel after validation was the same (i.e. submodel `r n_best_cc`) with slightly higher AUC values (`r output_best_cc[["auc"]]`).
+
+To understand the predictive relationship between the predictors and each STBBI of interest, we compared the final model obtained with STBBI as outcome to models developed using HIV/syphilis, HIV/HCV, or HCV as outcomes. In this analysis and the complete case analysis, we used a 5-fold instead of LOO cross-validation to decrease computational cost in the predictive projection step of model development. The results were similar when we restricted the outcome to HCV status or removed syphilis cases from the analysis, with the same highest performing submodel (AUC$_{HCV}$ = `r output_best_hcv[["auc"]]` & AUC $_{HCV/HIV}$ = `r output_best_no_s[["auc"]]`). With HIV and/or syphilis as the outcome, predictor ranking was completely different with *PastSyphilis* and *PastSyphilisTest* as the two most important predictors. The highest performing submodel was different and included seven variables (i.e. *PastSyphilis*, *PastSyphilisTest, Gender*, *TypePastSTI*, *Clinic.Location*, *Age*, *MonthlyIncomeStatus*).
+
+### Supplementary references
+
+Burkner, Piironen, Vehtari <!--# cut and paste the three last refs of the list -->
+
+## Supplementary tables
+
+::: {#cor-1}
+<div>
+
+Participant characteristics distribution by community clinic in the development and validation dataset before imputation.
+
+```{r, results='asis'}
+#transform to a dataframe
+df_imp<- as.data.frame(imp.mids$data)
+#load training set data
+sampled_pID <- read.csv("4_outputs/training_set_imp.csv") %>% 
+  select(p_id)
+
+# select all variables except p_id, date.recruited and site that will be shown in table 1
+tab.data <- df_imp %>% 
+  mutate(stbbi.pos = ifelse(
+           hcv.pos == 1| hiv.pos ==1 | syphilis.pos==1, "Positive", "Negative"),
+         hiv.hcv.pos = ifelse(
+           hcv.pos == 1 & hiv.pos ==1, "Positive", "Negative"),
+         hiv.syph.pos = ifelse(
+           hiv.pos ==1 & syphilis.pos==1, "Positive", "Negative"),
+         hcv.syph.pos = ifelse(
+           hcv.pos ==1 & syphilis.pos==1, "Positive", "Negative")
+         ) %>% 
+    mutate(across(c("hcv.pos", "hiv.pos", "syphilis.pos",
+                  "new.hcv", "new.hiv", "new.syphilis"), ~ifelse(.==1, "Positive", "Negative"))) %>%
+  mutate(site=ifelse(site==1,"RECAP", "REZO"),
+         dataset=case_when(
+         p_id %in% sampled_pID$p_id ~ "Development",
+         T ~ "Validation"))
+
+tab.data <- tab.data %>%
+  mutate(across(3:33, as.factor))
+
+cols_with_missing <- sapply(tab.data, function(x) any(is.na(x)) && is.factor(x))
+
+for (col in names(tab.data)[cols_with_missing]) {
+  tab.data[[col]] <- factor(tab.data[[col]], levels = c(levels(tab.data[[col]]), "Missing"))
+  tab.data[[col]][is.na(tab.data[[col]])] <- "Missing"
+}
+
+myvars <- names(tab.data)
+formula<- reformulate(myvars[c(3:27,29:32)], response = "site")
+
+tab <- tableby(formula, 
+               data = tab.data, 
+               test = FALSE,
+               strata = dataset)
+
+table_2 <- summary(tab)
+table_2
+
+```
+
+</div>
+:::
+
+{{< pagebreak >}}
+
+::: {#cor-2}
+Participant characteristics distribution by community clinic in the development and validation dataset after imputation.
+
+```{r, results='asis'}
+df_pooled <- complete(imp.mids) %>% 
+  as.data.frame()
+
+# select all variables except p_id, date.recruited and site that will be shown in table 1
+tab.data.s2 <- df_pooled %>% 
+  mutate(stbbi.pos = ifelse(
+           hcv.pos == 1| hiv.pos ==1 | syphilis.pos==1, "Positive", "Negative"),
+         hiv.hcv.pos = ifelse(
+           hcv.pos == 1 & hiv.pos ==1, "Positive", "Negative"),
+         hiv.syph.pos = ifelse(
+           hiv.pos ==1 & syphilis.pos==1, "Positive", "Negative"),
+         hcv.syph.pos = ifelse(
+           hcv.pos ==1 & syphilis.pos==1, "Positive", "Negative")) %>% 
+    mutate(across(c("hcv.pos", "hiv.pos", "syphilis.pos", 
+                  "new.hcv", "new.hiv", "new.syphilis"), ~ifelse(.==1, "Positive", "Negative"))) %>%
+  mutate(site=ifelse(site==1,"RECAP", "REZO"),
+         dataset=case_when(
+         p_id %in% sampled_pID$p_id ~ "Development",
+         T ~ "Validation"
+         ))
+
+tab.data.s2 <- tab.data.s2 %>%
+  mutate(across(3:33, as.factor))
+
+myvars <- names(tab.data.s2)
+formula<- reformulate(myvars[c(3:27,29:32)], response = "site")
+
+tab <- tableby(formula, 
+               data = tab.data.s2, 
+               test = FALSE,
+               strata = dataset)
+
+S_table <- summary(tab)
+S_table
+```
+:::
+
+{{< pagebreak >}}
+
+::: {#cor-3}
+Behavioural parameters distributions by incident compared to existing HIV, HCV, and syphilis cases p-values of a 2-way t-test of proportion conducted for each parameter.
+
+```{r , results='asis'}
+## subset only variables of interest
+behav.var <- as.vector(df_1[df_1$Category == "Behavioural", "Parameters"])
+
+
+# create a new column with incident case or not
+sup.tab <-  df_imp %>% 
+   select(behav.var$Parameters, 22:27) %>%
+  mutate(incident.hiv = case_when(
+    new.hiv == 1 ~ "Incident",
+    hiv.pos == 1 & new.hiv==0 ~ "Pre-existing",
+    T ~ NA
+  ),
+  incident.hcv = case_when(
+    new.hcv == 1 ~ "Incident",
+    hcv.pos == 1 & new.hcv==0 ~ "Pre-existing",
+    T ~ NA
+  ),
+  incident.syph = case_when(
+    new.syphilis == 1 ~ "Incident",
+    syphilis.pos == 1 & new.syphilis==0 ~ "Pre-exisiting",
+    T ~ NA
+  ))  %>% 
+  filter(!is.na(incident.hiv)|!is.na(incident.hcv)|!is.na(incident.syph)) # remove negative cases
+
+## the default test is an ANOVA t-test - is that appropriate (could also do chi square or Fisher)
+
+## function 
+
+
+two_by_two <-  function(xvar, 
+                    yvar,
+                    data = df){
+  formula <- reformulate(xvar, response = yvar)
+  
+  two_by_two_tab<- tableby(formula, data)
+  
+  return(two_by_two_tab)
+}
+
+
+## HIV
+two_by_two_hiv <- two_by_two(xvar=behav.var$Parameters,
+                         yvar= "incident.hiv",
+                         data=sup.tab)
+
+## HCV
+
+two_by_two_hcv <- two_by_two(xvar=behav.var$Parameters,
+                         yvar= "incident.hcv",
+                         data=sup.tab)
+
+## syphilis 
+
+two_by_two_syph <- two_by_two(xvar=behav.var$Parameters,
+                         yvar= "incident.syph",
+                         data=sup.tab)
+
+
+
+# merge tables together 
+
+tab_2_by_2 <- merge(two_by_two_hiv, two_by_two_hcv, all=TRUE)
+
+tab_2_by_2 <- merge(tab_2_by_2, two_by_two_syph, all=TRUE)
+
+summary(tab_2_by_2, title = c("HIV positive", "HCV positive", "Syphilis positive"))
+
+```
+:::
+
+## Supplementary figures
+
+::: {#lem-1}
+Missing data for each model parameter showed a pattern that differed per site. Each panel represents the frequency of missing and non-missing data for the REZO compared to the RECAP site. The labels represent the significance of a 2-way t-test of missingness proportion conducted for each parameter. Significant results (i.e \<0.05) are highlighted in gold.
+
+```{r}
+knitr::include_graphics("4_outputs/missingness_site.png")
+```
+:::
+
+{{< pagebreak >}}
+
+::: {#lem-2}
+Density plot of observed values of model parameters (blue) and their corresponding imputed values (red). Data was imputed into five datasets using Bayesian logistic regression and Bayesian polytomous regression for binary and multi-categorical (\>2) parameters, respectively. The imputation successfully reproduced observed data distribution under the assumption that unobserved data would have been the same as observed data.
+
+```{r}
+knitr::include_graphics("4_outputs/density_1l_imp.png")
+```
+:::
+
+{{< pagebreak >}}
+
+::: {#lem-3}
+Posterior predictive distribution of the full model ($p=20$) fitted with the development (i.e. training) dataset (n=300) for which we assigned horseshoe priors ($\tau=0.02$) to the coefficient of each predictor in the model. Horseshoe priors shrunk most unimportant predictors to values close to 0.
+
+```{r}
+knitr::include_graphics("4_outputs/posteriors_full_model_rev.png")
+```
+:::
+
+{{< pagebreak>}}
+
+::: {#lem-4}
+Cumulative agreement of predictor ranking in each cross-validation fold of the predictive projection using a solution path method. Each cell represents the position of the predictor (y-axis) for a submodel of a specific size (x-axis). *PastInjectDrugs* was identified as the first predictor of all submodels in each leave-one-out cross-validation fold.
+
+```{r}
+knitr::include_graphics("4_outputs/cv.png")
+```
+:::
+
+{{< pagebreak >}}
+
+::: {#lem-5}
+Sensitivity and specificity of nine sub-models and the full reference model (p=20) fitted with the development (i.e. training; blue; n=300) and validation (i.e. testing; purple; n=100) datasets. We measured sensitivity and specificity based on 2000 samples of STBBI status drawn from the posterior predictive distributions for each model. On the x-axis, each predictor named represents the submodel containing it and all predictors to its left. The reference model contains all available predictors. Sensitivity and specificity are similar across models for both datasets. Each point represents the median and each line represents the 89% Credible Intervals of the predictive distribution
+
+```{r}
+knitr::include_graphics("4_outputs/sp.sn.png")
+```
+:::
+
+{{< pagebreak >}}
